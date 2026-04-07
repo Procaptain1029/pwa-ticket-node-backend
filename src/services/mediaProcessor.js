@@ -131,10 +131,12 @@ CASO 1 — Documento vehicular / matrícula / placa:
 - IMPORTANTE: Los documentos ecuatorianos tienen campos con etiquetas como:
   MARCA → marca, MODELO → modelo, CILINDRAJE → cilindraje,
   MOTOR → motor, CHASIS → chasis, PLACA → placa, SERIE → serie, No. MOTOR → motor
-- CRÍTICO SOBRE EL AÑO: Los documentos ecuatorianos tienen DOS campos de año:
-  * "AÑO" (arriba) = año de matriculación/registro → NO USAR ESTE
-  * "AÑO MODELO" (abajo) = año real del modelo del vehículo → USAR ESTE para el campo "anio"
-  * Si solo hay un campo "AÑO", úsalo. Pero si hay ambos, SIEMPRE usar "AÑO MODELO"
+- ⚠️⚠️⚠️ MÁXIMA PRIORIDAD — AÑO: Los documentos ecuatorianos tienen DOS campos de año DIFERENTES:
+  * "AÑO" (esquina superior derecha, número grande) = año de MATRICULACIÓN/REGISTRO → ❌ NUNCA USAR ESTE
+  * "AÑO MODELO" (lado derecho, número más pequeño, a veces parcialmente tapado por sellos) = año REAL del modelo → ✅ SIEMPRE USAR ESTE para "anio"
+  * Ejemplo: Si "AÑO" dice 2023 y "AÑO MODELO" dice 2011, el valor correcto para "anio" es "2011" (NO "2023")
+  * El campo "AÑO MODELO" suele estar en la parte derecha del documento, puede estar en texto pequeño o parcialmente cubierto por sellos/timbres
+  * Si solo hay un campo "AÑO" sin "AÑO MODELO", entonces sí usar ese valor
 - Lee TODOS los campos etiquetados del documento y mapéalos al JSON
 - El campo CILINDRAJE suele tener un número como 1400, 1500, 1600, 1800, 1998, 2000 (en cc)
 - MODELOS ESPECÍFICOS A DETECTAR:
