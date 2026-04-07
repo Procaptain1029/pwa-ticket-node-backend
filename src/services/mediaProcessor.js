@@ -129,8 +129,12 @@ CASO 1 — Documento vehicular / matrícula / placa:
 - Estos datos se usan para identificar el vehículo y buscar repuestos compatibles
 - Busca estos datos en documentos de matrícula, tarjetas de propiedad, placas, etiquetas VIN, etc.
 - IMPORTANTE: Los documentos ecuatorianos tienen campos con etiquetas como:
-  MARCA → marca, MODELO → modelo, AÑO → anio, CILINDRAJE → cilindraje,
+  MARCA → marca, MODELO → modelo, CILINDRAJE → cilindraje,
   MOTOR → motor, CHASIS → chasis, PLACA → placa, SERIE → serie, No. MOTOR → motor
+- CRÍTICO SOBRE EL AÑO: Los documentos ecuatorianos tienen DOS campos de año:
+  * "AÑO" (arriba) = año de matriculación/registro → NO USAR ESTE
+  * "AÑO MODELO" (abajo) = año real del modelo del vehículo → USAR ESTE para el campo "anio"
+  * Si solo hay un campo "AÑO", úsalo. Pero si hay ambos, SIEMPRE usar "AÑO MODELO"
 - Lee TODOS los campos etiquetados del documento y mapéalos al JSON
 - El campo CILINDRAJE suele tener un número como 1400, 1500, 1600, 1800, 1998, 2000 (en cc)
 - MODELOS ESPECÍFICOS A DETECTAR:

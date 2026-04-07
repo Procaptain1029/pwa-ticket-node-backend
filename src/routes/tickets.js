@@ -1059,9 +1059,14 @@ router.get('/', asyncHandler(async (req, res) => {
   // Per client spec §1: Operator cannot see ticket work queue (generate only)
   // They can still view the list for reference but won't see action buttons
   
-  // Apply filters
+  // Apply filters (support comma-separated statuses like 'pending,en_revision')
   if (status && status !== 'all') {
-    query = query.eq('status', status);
+    if (status.includes(',')) {
+      const statuses = status.split(',').map(s => s.trim());
+      query = query.in('status', statuses);
+    } else {
+      query = query.eq('status', status);
+    }
   } else if (!status) {
     // Default: exclude terminal statuses from the active work queue
     query = query.not('status', 'in', '("closed","cancelled","reenviado")');
@@ -2010,6 +2015,8 @@ router.post('/:id/use-as-base/:sourceId',
         if (bestMatch.codigo_distrimia && !targetItem.codigo_distrimia) updateData.codigo_distrimia = bestMatch.codigo_distrimia;
         if (bestMatch.codigo_oem && !targetItem.codigo_oem) updateData.codigo_oem = bestMatch.codigo_oem;
         if (bestMatch.codigo_fabrica && !targetItem.codigo_fabrica) updateData.codigo_fabrica = bestMatch.codigo_fabrica;
+        if (bestMatch.seller_note && !targetItem.seller_note) updateData.seller_note = bestMatch.seller_note;
+        if (bestMatch.estimated_delivery && !targetItem.estimated_delivery) updateData.estimated_delivery = bestMatch.estimated_delivery;
         
         if (Object.keys(updateData).length > 0) {
           const { data: updated } = await supabaseAdmin
@@ -2020,6 +2027,34 @@ router.post('/:id/use-as-base/:sourceId',
             .single();
           
           if (updated) updatedItems.push(updated);
+        }
+        
+        // Copy alternatives from source item to target item
+        const { data: sourceAlts } = await supabaseAdmin
+          .from('ticket_item_alternatives')
+          .select('*')
+          .eq('ticket_item_id', bestMatch.id)
+          .order('created_at', { ascending: true });
+        
+        if (sourceAlts && sourceAlts.length > 0) {
+          // Remove existing alternatives on target item first
+          await supabaseAdmin
+            .from('ticket_item_alternatives')
+            .delete()
+            .eq('ticket_item_id', targetItem.id);
+          
+          // Copy source alternatives to target item
+          const newAlts = sourceAlts.map(alt => ({
+            ticket_item_id: targetItem.id,
+            brand: alt.brand,
+            selling_price: alt.selling_price,
+            cost_price: alt.cost_price,
+            supplier_code: alt.supplier_code,
+            codigo_distrimia: alt.codigo_distrimia,
+            codigo_oem: alt.codigo_oem,
+            notes: alt.notes
+          }));
+          await supabaseAdmin.from('ticket_item_alternatives').insert(newAlts);
         }
       }
     }

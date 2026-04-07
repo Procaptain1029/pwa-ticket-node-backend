@@ -66,8 +66,7 @@ No hay artículos en este ticket.
   let hasDelivery = false;
   let hasVerification = false;
 
-  // Build item lines grouped by status with blank line between groups
-  let lastStatusGroup = null;
+  // Build item lines grouped by status
   const itemLines = sortedItems.map(item => {
     const desc = item.parsed_description || item.raw_line;
     const qty = item.quantity > 1 ? ` x${item.quantity}` : '';
@@ -102,11 +101,7 @@ No hay artículos en este ticket.
       line = `⏳ ${desc}${qty}`;
     }
 
-    // Add blank line between different status groups
-    const currentGroup = statusOrder[item.status] ?? 4;
-    const prefix = (lastStatusGroup !== null && currentGroup !== lastStatusGroup) ? '\n' : '';
-    lastStatusGroup = currentGroup;
-    return prefix + line;
+    return line;
   }).join('\n');
 
   // Total only from positive items with price (USD format)
