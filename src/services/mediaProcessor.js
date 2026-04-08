@@ -170,7 +170,7 @@ Reglas generales:
           },
           {
             type: 'text',
-            text: 'Analiza esta imagen. Si es un documento vehicular o matrícula, extrae: modelo, motor, año, chasis, serie, placa, marca, cilindraje. Si es una lista de repuestos o autopartes, extrae todos los items.'
+            text: 'Analiza esta imagen. Si es un documento vehicular o matrícula, extrae: modelo, motor, año, chasis, serie, placa, marca, cilindraje. IMPORTANTE: Si ves DOS campos de año — "AÑO" y "AÑO MODELO" — usa SOLO el valor de "AÑO MODELO" para el campo anio (es el año real del vehículo). El campo "AÑO" grande es solo el año de registro, NO usarlo. Si es una lista de repuestos o autopartes, extrae todos los items.'
           }
         ]
       }
@@ -187,6 +187,7 @@ Reglas generales:
   
     // Apply same normalization as text parsing
     let vehicleInfo = parsed.vehicle_info || null;
+    console.log(`[IMAGE] AI raw vehicle_info:`, JSON.stringify(vehicleInfo));
     if (vehicleInfo) {
       // Normalize vehicle info (must match ticketParser.js normalizeVehicleInfo)
       const normalizeVehicle = (info) => {

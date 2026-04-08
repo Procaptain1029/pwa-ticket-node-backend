@@ -641,9 +641,6 @@ async function findDuplicates(ticketData, groupCode) {
       
       // If vehicles are clearly different → NOT a duplicate, skip
       if (!vehicleResult.match) continue;
-      
-      // If vehicle info is missing/unknown → skip (generic items alone don't count)
-      if (vehicleResult.confidence === 'unknown') continue;
 
       // --- STEP 2: Only evaluate items if vehicle passed ---
       const existingItems = itemsByTicket[existing.id] || [];
@@ -684,12 +681,13 @@ async function findDuplicates(ticketData, groupCode) {
         similarity = Math.min(1.0, similarity * 1.25 + 0.1);
       }
       // 'compatible' → no boost (same base model but different detail level)
+      // 'unknown' (vehicle info missing) → require higher threshold
+      const threshold = vehicleResult.confidence === 'unknown' ? 0.8 : 0.5;
       
-      // Threshold: 50% to show as potential duplicate
-      if (similarity >= 0.5) {
+      if (similarity >= threshold) {
         const label = classifyDuplicateLabel(existing, existingItems);
         
-        console.log(`[DUP] New ticket vs #${existing.k_number}: itemSim=${itemSimilarity.toFixed(2)} rawSim=${rawTextSimilarity.toFixed(2)} final=${similarity.toFixed(2)} vehicle=${vehicleResult.confidence} label=${label}`);
+        console.log(`[DUP] New ticket vs #${existing.k_number} (grp:${existing.group_code}): itemSim=${itemSimilarity.toFixed(2)} rawSim=${rawTextSimilarity.toFixed(2)} final=${similarity.toFixed(2)} vehicle=${vehicleResult.confidence} threshold=${threshold} label=${label}`);
         
         duplicates.push({
           ticket: existing,
@@ -708,7 +706,7 @@ async function findDuplicates(ticketData, groupCode) {
     });
     
     if (duplicates.length === 0) {
-      console.log(`[DUP] No duplicates found. Checked ${recentTickets.length} tickets, newItems=${newItemTokenSets.length}, rawTokens=${newRawTokens.allTokens.length}`);
+      console.log(`[DUP] No duplicates found. Checked ${recentTickets.length} tickets, newItems=${newItemTokenSets.length}, rawTokens=${newRawTokens.allTokens.length}, newVehicle=${JSON.stringify(newVehicle)}`);
     }
     
     return duplicates.slice(0, 10); // Max 10 duplicates
