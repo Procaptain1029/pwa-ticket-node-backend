@@ -170,7 +170,7 @@ Reglas generales:
           },
           {
             type: 'text',
-            text: 'Analiza esta imagen. Si es un documento vehicular o matrícula, extrae: modelo, motor, año, chasis, serie, placa, marca, cilindraje. IMPORTANTE: Si ves DOS campos de año — "AÑO" y "AÑO MODELO" — usa SOLO el valor de "AÑO MODELO" para el campo anio (es el año real del vehículo). El campo "AÑO" grande es solo el año de registro, NO usarlo. Si es una lista de repuestos o autopartes, extrae todos los items.'
+            text: '⚠️⚠️⚠️ CRITICAL RULE FOR AÑO: If this is a matrícula/documento vehicular, there are TWO year fields: "AÑO" (large number, registration year) and "AÑO MODELO" (smaller number, actual model year). YOU MUST USE "AÑO MODELO" for the anio field. NEVER use the large "AÑO" value. Example: if AÑO says 2015 and AÑO MODELO says 2013, use 2013 for anio. This is the MOST IMPORTANT rule.\n\nNow analyze this image. If it is a documento vehicular or matrícula, extrae: modelo, motor, año, chasis, serie, placa, marca, cilindraje. Si es una lista de repuestos o autopartes, extrae todos los items.'
           }
         ]
       }
