@@ -27,8 +27,19 @@ app.set('trust proxy', 1);
 
 // Security middleware
 app.use(helmet());
+
+// CORS: only the backend reads FRONTEND_URL (Next.js frontend .env does not affect this).
+// Browsers treat http://127.0.0.1:3000 and http://localhost:3000 as different origins.
+const defaultDevOrigins = ['http://localhost:3000', 'http://127.0.0.1:3000'];
+const envOrigin = process.env.FRONTEND_URL?.replace(/\/$/, '') || null;
+const allowedOrigins = [...new Set([envOrigin, ...defaultDevOrigins].filter(Boolean))];
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(null, false);
+  },
   credentials: true,
 }));
 

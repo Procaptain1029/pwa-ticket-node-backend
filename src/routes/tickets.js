@@ -176,6 +176,7 @@ router.post('/analyze-images',
 
     res.json({
       vehicle_info: analysis.vehicle_info,
+      products: analysis.products || [],
       extracted_texts: analysis.extracted_texts,
       descriptions: analysis.descriptions,
       image_count: req.files.length
@@ -2041,18 +2042,19 @@ router.post('/:id/use-as-base/:sourceId',
             .delete()
             .eq('ticket_item_id', targetItem.id);
           
-          // Copy source alternatives to target item
+          // Copy source alternatives to target item (must match ticket_item_alternatives schema)
           const newAlts = sourceAlts.map(alt => ({
             ticket_item_id: targetItem.id,
             brand: alt.brand,
             selling_price: alt.selling_price,
             cost_price: alt.cost_price,
+            source: alt.source,
             supplier_code: alt.supplier_code,
-            codigo_distrimia: alt.codigo_distrimia,
-            codigo_oem: alt.codigo_oem,
+            estimated_delivery: alt.estimated_delivery,
             notes: alt.notes
           }));
-          await supabaseAdmin.from('ticket_item_alternatives').insert(newAlts);
+          const { error: altError } = await supabaseAdmin.from('ticket_item_alternatives').insert(newAlts);
+          if (altError) console.error(`[USE-AS-BASE] Failed to copy alternatives for item ${targetItem.id}:`, altError.message);
         }
       }
     }

@@ -1,4 +1,6 @@
 import openai, { OPENAI_MODEL } from '../config/openai.js';
+import { consolidateMatriculaAnio } from './mediaProcessor.js';
+import { mergeVehicleInfoWithModelBase } from './modelBaseMatcher.js';
 
 /**
  * AI-powered ticket parser service
@@ -30,6 +32,7 @@ VEHICLE DETECTION RULES:
   Example: "NUEVO MAZDA3 AC 2.0 4P 4X2 TM\nRotula\nBomba de agua" → vehicle_info.modelo="NUEVO MAZDA3 AC 2.0 4P 4X2 TM", items=[Rotula, Bomba de agua]
 - Also detect when vehicle info appears with "Modelo:", "Marca:", "Cilindraje:" labels (from image extraction):
   Example: "Modelo: SAIL 1500\nMarca: CHEVROLET\nCilindraje: 1500\nBomba de agua" → extract vehicle_info from labeled fields, items=[Bomba de agua]
+- ECUADOR MATRÍCULA / DOCUMENTO VEHICULAR: If the text has BOTH "Año modelo" / "AÑO MODELO" and a separate "Año:" / "AÑO" (without "modelo"), vehicle_info.anio MUST be the value from AÑO MODELO / año modelo (technical model year), NEVER the registration-only year. Example: "Año: 2023" and "Año modelo: 2011" → anio="2011".
 - Look for car brands: Toyota, Hyundai, Kia, Chevrolet, Nissan, Ford, Honda, Mazda, Suzuki, Mitsubishi, Chery, etc.
 - Look for models: Corolla, Hilux, Sportage, Accent, Tucson, Sail, Captiva, Spark, Aveo, Onix, Maxima, Civic, Mazda3, etc.
 - Look for years: 2015, 2018, 2019, 2020, etc.
@@ -186,6 +189,8 @@ function normalizeVehicleInfo(vehicleInfo) {
   // Filter out unwanted fields
   delete normalized.combustible;
   delete normalized.color;
+  delete normalized.model_detection_source;
+  delete normalized.model_detection_confidence;
   
   return normalized;
 }
@@ -198,8 +203,11 @@ function enhanceParsedTickets(parsed, groupCode, originalRawText) {
     // Recalculate item count
     const itemCount = ticket.items?.length || 0;
     
-    // Normalize vehicle info
-    const normalizedVehicle = normalizeVehicleInfo(ticket.vehicle_info);
+    // Normalize vehicle info (fix Ecuador matrícula: año modelo vs año registro)
+    let vehicleForNorm = ticket.vehicle_info ? { ...ticket.vehicle_info } : {};
+    vehicleForNorm = mergeVehicleInfoWithModelBase(vehicleForNorm, [originalRawText, ticket.raw_text || '']);
+    consolidateMatriculaAnio(vehicleForNorm, [originalRawText, ticket.raw_text || '']);
+    const normalizedVehicle = normalizeVehicleInfo(vehicleForNorm);
     
     // Determine length class
     let lengthClass = 'short';

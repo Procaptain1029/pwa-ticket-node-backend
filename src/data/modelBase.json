@@ -1,0 +1,50 @@
+[
+  {
+    "marca": "CHEVROLET",
+    "modelo": "SAIL 1400",
+    "aliases": ["SAIL 1.4", "CHEVROLET SAIL 1400", "SAIL1400"],
+    "cilindraje": "1400cc"
+  },
+  {
+    "marca": "CHEVROLET",
+    "modelo": "SAIL 1500",
+    "aliases": ["SAIL 1.5", "CHEVROLET SAIL 1500", "SAIL1500"],
+    "cilindraje": "1500cc"
+  },
+  {
+    "marca": "TOYOTA",
+    "modelo": "COROLLA 1.8 XEI",
+    "aliases": ["COROLLA XEI 1.8", "TOYOTA COROLLA XEI"],
+    "cilindraje": "1800cc"
+  },
+  {
+    "marca": "NISSAN",
+    "modelo": "MAXIMA 3.5 SV",
+    "aliases": ["MAXIMA SV 3.5", "NISSAN MAXIMA 3.5 SV"],
+    "cilindraje": "3500cc"
+  },
+  {
+    "marca": "MAZDA",
+    "modelo": "NUEVO MAZDA3 AC 2.0 4P 4X2 TM",
+    "aliases": ["MAZDA3 AC 2.0 4P 4X2 TM", "NUEVO MAZDA 3 2.0"],
+    "cilindraje": "2000cc"
+  },
+  {
+    "marca": "HONDA",
+    "modelo": "CIVIC 1.5 TURBO EX",
+    "aliases": ["CIVIC TURBO EX 1.5", "HONDA CIVIC 1.5 TURBO EX"],
+    "cilindraje": "1500cc"
+  },
+  {
+    "marca": "KIA",
+    "modelo": "SPORTAGE 2.0",
+    "aliases": ["KIA SPORTAGE 2.0", "SPORTAGE 2000"],
+    "cilindraje": "2000cc"
+  },
+  {
+    "marca": "HYUNDAI",
+    "modelo": "ACCENT 1.6",
+    "aliases": ["HYUNDAI ACCENT 1.6", "ACCENT 1600"],
+    "cilindraje": "1600cc"
+  }
+]

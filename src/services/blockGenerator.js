@@ -47,13 +47,13 @@ export function generateCustomerProformaBlock(ticket, items) {
   const dateStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`;
 
   if (!items || items.length === 0) {
-    return `📄 PROFORMA – DISTRIMIA S.A.
-N° ${ticket.k_number} | 📅 ${dateStr}
-${vehicleParts ? `🚗 ${vehicleParts}` : ''}
-
-No hay artículos en este ticket.
-
-⚠ Precios sujetos a cambio sin previo aviso`;
+    return [
+      '📄 PROFORMA – DISTRIMIA S.A.',
+      `N° ${ticket.k_number} | 📅 ${dateStr}`,
+      vehicleParts ? `🚗 ${vehicleParts}` : null,
+      'No hay artículos en este ticket.',
+      '⚠ Precios sujetos a cambio sin previo aviso',
+    ].filter(Boolean).join('\n');
   }
 
   // Sort items by status for client readability: available first, then verification, then unavailable
@@ -110,35 +110,31 @@ No hay artículos en este ticket.
     sum + (parseFloat(item.selling_price) * (item.quantity || 1)), 0
   );
 
-  const totalLine = positiveItems.length > 0
-    ? `\n\n💰 TOTAL: USD ${total.toFixed(2).replace('.', ',')}`
-    : '';
+  // Build output as sections; join with single newline — no blank lines.
+  const sections = [];
 
-  const sellerNotesLine = ticket.seller_notes
-    ? `\n📝 ${ticket.seller_notes}`
-    : '';
+  sections.push(`📄 PROFORMA – DISTRIMIA S.A.`);
+  sections.push(`N° ${ticket.k_number} | 📅 ${dateStr}`);
+  sections.push(`🚗 ${vehicleParts || 'Sin información de vehículo'}`);
+  if (vehicleExtra) sections.push(vehicleExtra);
 
-  // Build legend lines
-  const legendParts = [];
-  if (hasDelivery) legendParts.push('🚚 despacho urgente (sujeto a horario de corte)');
-  if (hasVerification) legendParts.push('🔍 sujeto a verificación');
-  const legend = legendParts.length > 0
-    ? '\n' + legendParts.join('\n')
-    : '';
+  sections.push(itemLines);
 
-  return `📄 PROFORMA – DISTRIMIA S.A.
-N° ${ticket.k_number} | 📅 ${dateStr}
+  if (positiveItems.length > 0) {
+    sections.push(`💰 TOTAL: USD ${total.toFixed(2).replace('.', ',')}`);
+  }
 
-🚗 ${vehicleParts || 'Sin información de vehículo'}${vehicleExtra ? `\n${vehicleExtra}` : ''}
+  if (hasDelivery) sections.push('🚚 despacho urgente (sujeto a horario de corte)');
+  if (hasVerification) sections.push('🔍 sujeto a verificación');
+  if (ticket.seller_notes) sections.push(`📝 ${ticket.seller_notes}`);
 
-${itemLines}${totalLine}
-${legend}${sellerNotesLine}
-⚠ Precios sujetos a cambio sin previo aviso
-📦 Disponibilidad sujeta a confirmación al momento de la solicitud
-📦 Precios incluyen IVA. Transporte no incluido.
+  sections.push('⚠ Precios sujetos a cambio sin previo aviso');
+  sections.push('📦 Disponibilidad sujeta a confirmación al momento de la solicitud');
+  sections.push('📦 Precios incluyen IVA. Transporte no incluido.');
+  sections.push('💬 Quedo atento a su confirmación para coordinar despacho.');
+  if (ticket.assigned_to_user) sections.push(`👤 Asesor comercial: ${ticket.assigned_to_user.full_name}`);
 
-💬 Quedo atento a su confirmación para coordinar despacho.
-${ticket.assigned_to_user ? `👤 Asesor comercial: ${ticket.assigned_to_user.full_name}` : ''}`;
+  return sections.filter(Boolean).join('\n');
 }
 
 /**
