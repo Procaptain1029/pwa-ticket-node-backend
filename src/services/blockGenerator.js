@@ -51,6 +51,7 @@ export function generateCustomerProformaBlock(ticket, items) {
       '📄 PROFORMA – DISTRIMIA S.A.',
       `N° ${ticket.k_number} | 📅 ${dateStr}`,
       vehicleParts ? `🚗 ${vehicleParts}` : null,
+      '',
       'No hay artículos en este ticket.',
       '⚠ Precios sujetos a cambio sin previo aviso',
     ].filter(Boolean).join('\n');
@@ -117,8 +118,10 @@ export function generateCustomerProformaBlock(ticket, items) {
   sections.push(`N° ${ticket.k_number} | 📅 ${dateStr}`);
   sections.push(`🚗 ${vehicleParts || 'Sin información de vehículo'}`);
   if (vehicleExtra) sections.push(vehicleExtra);
+  sections.push('');
 
   sections.push(itemLines);
+  sections.push('');
 
   if (positiveItems.length > 0) {
     sections.push(`💰 TOTAL: USD ${total.toFixed(2).replace('.', ',')}`);
