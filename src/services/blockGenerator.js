@@ -37,9 +37,9 @@ Estado: ${formatStatus(ticket.status)}${ticket.vehicle_info ? `\n🚗 ${formatVe
 export function generateCustomerProformaBlock(ticket, items) {
   // Compact vehicle info
   const vi = ticket.vehicle_info || {};
-  const vehicleParts = [vi.marca, vi.modelo, vi.cilindraje, vi.anio ? `(${vi.anio})` : null]
+  const vehicleParts = [vi.marca, vi.modelo, shouldAppendCilindraje(vi.modelo, vi.cilindraje) ? vi.cilindraje : null, vi.anio ? `(${vi.anio})` : null]
     .filter(Boolean).join(' ');
-  const vehicleExtra = [vi.motor ? `Motor: ${vi.motor}` : null, vi.cilindraje ? `${vi.cilindraje} cc` : null]
+  const vehicleExtra = [vi.motor ? `Motor: ${vi.motor}` : null, shouldAppendCilindraje(vi.modelo, vi.cilindraje) ? `${vi.cilindraje} cc` : null]
     .filter(Boolean).join(' | ');
 
   // Format date as DD/MM/YYYY
@@ -413,11 +413,22 @@ function formatVehicleInfo(vehicleInfo) {
   if (vehicleInfo.marca) parts.push(vehicleInfo.marca);
   if (vehicleInfo.modelo) parts.push(vehicleInfo.modelo);
   if (vehicleInfo.motor) parts.push(`Motor: ${vehicleInfo.motor}`);
-  if (vehicleInfo.cilindraje) parts.push(`Cilindraje: ${vehicleInfo.cilindraje}`);
+  if (shouldAppendCilindraje(vehicleInfo.modelo, vehicleInfo.cilindraje)) parts.push(`Cilindraje: ${vehicleInfo.cilindraje}`);
   if (vehicleInfo.anio) parts.push(vehicleInfo.anio);
   if (vehicleInfo.placa) parts.push(`Placa: ${vehicleInfo.placa}`);
   if (vehicleInfo.chasis) parts.push(`Chasis: ${vehicleInfo.chasis}`);
   return parts.length > 0 ? parts.join(' | ') : null;
+}
+
+function shouldAppendCilindraje(modelo, cilindraje) {
+  if (!cilindraje) return false;
+  if (!modelo) return true;
+
+  const modelNormalized = String(modelo).toLowerCase().replace(/\s+/g, '');
+  const digits = String(cilindraje).match(/\d+/g);
+  if (!digits || digits.length === 0) return true;
+
+  return !modelNormalized.includes(digits.join(''));
 }
 
 function getStatusEmoji(status) {
