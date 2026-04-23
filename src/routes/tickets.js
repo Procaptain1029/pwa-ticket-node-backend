@@ -148,6 +148,358 @@ const upload = multer({
   }
 });
 
+// Multer config specifically for Express Entry (10MB limit, max 5 files)
+const expressUpload = multer({
+  storage: multer.diskStorage({
+    destination: os.tmpdir(),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname);
+      cb(null, `express-${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`);
+    }
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max per file
+  fileFilter: (req, file, cb) => {
+    const allowedImage = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    const allowedAudio = ['audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/wav', 'audio/m4a', 'audio/mp4', 'audio/x-m4a', 'audio/webm', 'audio/opus'];
+    if ([...allowedImage, ...allowedAudio].includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`Tipo de archivo no soportado: ${file.mimetype}`));
+    }
+  }
+});
+
+/**
+ * POST /api/tickets/express
+ * Express Entry: Quick ticket creation from WhatsApp share.
+ * 
+ * Flow:
+ *   1. Immediately save a "shell" ticket with raw text + attachments (< 1s)
+ *   2. Return success so operator can go back to WhatsApp
+ *   3. Fire background processing (AI parse, duplicate check, SLA) — non-blocking
+ * 
+ * Body (multipart/form-data):
+ *   - group_code (string, required): client/group code
+ *   - shared_text (string, optional): text shared from WhatsApp
+ *   - media (files, optional): up to 5 images/audio files (10MB each)
+ */
+router.post('/express',
+  authorize(['operator', 'seller', 'dispatcher', 'admin']),
+  expressUpload.array('media', 5),
+  asyncHandler(async (req, res) => {
+    const groupCode = req.body.group_code;
+    if (!groupCode || !groupCode.trim()) {
+      // Clean up any uploaded files
+      if (req.files) {
+        for (const f of req.files) { try { fs.unlinkSync(f.path); } catch {} }
+      }
+      return res.status(400).json({ 
+        error: 'Código de grupo requerido', 
+        code: 'MISSING_GROUP_CODE' 
+      });
+    }
+
+    const userId = req.user.id;
+    const sharedText = (req.body.shared_text || '').trim();
+    const files = req.files || [];
+
+    // --- STEP 1: Quick save — create shell ticket immediately ---
+    const { data: kNumberResult, error: kError } = await supabaseAdmin
+      .rpc('generate_k_number');
+    if (kError) throw kError;
+    const kNumber = kNumberResult;
+
+    const { data: ticket, error: ticketError } = await supabaseAdmin
+      .from('tickets')
+      .insert({
+        k_number: kNumber,
+        group_code: groupCode.trim(),
+        raw_text: sharedText || '[Express - contenido en adjuntos]',
+        item_count: 0,
+        length_class: 'short',
+        priority: 'normal',
+        status: 'pending',
+        entry_type: 'express',
+        bg_processing_status: 'pending',
+        created_by: userId,
+        updated_by: userId
+      })
+      .select()
+      .single();
+
+    if (ticketError) {
+      // Clean up temp files on failure
+      for (const f of files) { try { fs.unlinkSync(f.path); } catch {} }
+      throw ticketError;
+    }
+
+    // Upload attachments (quick — just store files, no AI)
+    const attachmentResults = [];
+    for (const file of files) {
+      try {
+        const fileBuffer = fs.readFileSync(file.path);
+        const attachment = await uploadAttachment(
+          fileBuffer, 
+          file.originalname, 
+          file.mimetype, 
+          file.size, 
+          ticket.id, 
+          userId
+        );
+        attachmentResults.push(attachment);
+      } catch (err) {
+        console.error(`[EXPRESS] Failed to upload attachment ${file.originalname}:`, err.message);
+      } finally {
+        try { fs.unlinkSync(file.path); } catch {}
+      }
+    }
+
+    // Audit log
+    await supabaseAdmin.from('audit_log').insert({
+      entity_type: 'ticket',
+      entity_id: ticket.id,
+      action: 'create',
+      new_values: { 
+        source: 'express', 
+        k_number: kNumber, 
+        group_code: groupCode.trim(),
+        attachments: attachmentResults.length,
+        has_text: !!sharedText
+      },
+      performed_by: userId
+    });
+
+    // --- STEP 2: Return immediately so operator can go back to WhatsApp ---
+    res.status(201).json({
+      message: `✅ Ticket #${kNumber} creado`,
+      ticket: {
+        id: ticket.id,
+        k_number: kNumber,
+        group_code: groupCode.trim(),
+        status: 'pending',
+        entry_type: 'express',
+        bg_processing_status: 'pending',
+        attachments: attachmentResults.length,
+      }
+    });
+
+    // --- STEP 3: Background processing (fire-and-forget) ---
+    processExpressTicketInBackground(ticket.id, sharedText, attachmentResults, groupCode.trim(), userId)
+      .catch(err => {
+        console.error(`[EXPRESS-BG] Background processing failed for ticket ${ticket.id}:`, err);
+      });
+  })
+);
+
+/**
+ * Background processor for Express Entry tickets.
+ * Runs AFTER the response has been sent to the operator.
+ * 
+ * Steps:
+ *   1. Transcribe audio files (if any) via Whisper
+ *   2. Combine all text sources
+ *   3. Run AI ticket parser (same as /generate)
+ *   4. Update ticket with parsed data (items, vehicle info, etc.)
+ *   5. Run duplicate detection
+ *   6. Update bg_processing_status to 'completed' or 'error'
+ */
+async function processExpressTicketInBackground(ticketId, sharedText, attachments, groupCode, userId) {
+  console.log(`[EXPRESS-BG] Starting background processing for ticket ${ticketId}`);
+  
+  try {
+    // Mark as processing
+    await supabaseAdmin.from('tickets').update({ bg_processing_status: 'processing' }).eq('id', ticketId);
+
+    // Collect text from all sources
+    const textParts = [];
+    if (sharedText) textParts.push(sharedText);
+
+    // Separate images and audio
+    const imageAttachments = attachments.filter(a => a.mime_type?.startsWith('image/'));
+    const audioAttachments = attachments.filter(a => a.mime_type?.startsWith('audio/'));
+
+    // Audio: NOT transcribing per client decision — just stored as attachments
+    // (If transcription is needed later, uncomment below)
+    // for (const audio of audioAttachments) { ... }
+
+    // Images: NOT analyzing with AI — just stored as attachments per client decision
+    // (If image analysis is needed later, uncomment below)
+    // for (const img of imageAttachments) { ... }
+
+    // If we have text to parse, run the AI parser
+    const combinedText = textParts.join('\n\n').trim();
+    
+    if (!combinedText) {
+      // No text to parse — mark as completed with just attachments
+      await supabaseAdmin.from('tickets').update({
+        bg_processing_status: 'completed',
+        raw_text: '[Express - solo adjuntos, sin texto]'
+      }).eq('id', ticketId);
+      
+      console.log(`[EXPRESS-BG] Ticket ${ticketId} completed (no text, attachments only)`);
+      return;
+    }
+
+    // Parse text with AI (same pipeline as /generate)
+    const parsed = await parseTicketText(combinedText, groupCode);
+
+    if (!parsed.tickets || parsed.tickets.length === 0) {
+      // Parser returned nothing — mark completed with raw text
+      await supabaseAdmin.from('tickets').update({
+        bg_processing_status: 'completed'
+      }).eq('id', ticketId);
+      
+      console.log(`[EXPRESS-BG] Ticket ${ticketId} completed (parser returned 0 tickets)`);
+      return;
+    }
+
+    // Use the first parsed ticket to update the shell ticket
+    // (Express entry = 1 share = 1 ticket, but if AI splits into multiple, create additional tickets)
+    const primaryTicket = parsed.tickets[0];
+    
+    // Update the original ticket with parsed data
+    const updateData = {
+      raw_text: combinedText,
+      item_count: primaryTicket.item_count || 0,
+      length_class: primaryTicket.length_class || 'short',
+      priority: primaryTicket.priority || 'normal',
+      vin: primaryTicket.vin || null,
+      vehicle_info: primaryTicket.vehicle_info || null,
+      possible_grouping: primaryTicket.possible_grouping || false,
+      bg_processing_status: 'completed',
+      updated_by: userId
+    };
+
+    await supabaseAdmin.from('tickets').update(updateData).eq('id', ticketId);
+
+    // Create items for the primary ticket
+    if (primaryTicket.items && primaryTicket.items.length > 0) {
+      const itemsToInsert = primaryTicket.items.map(item => ({
+        ticket_id: ticketId,
+        item_order: item.item_order,
+        raw_line: item.raw_line,
+        parsed_description: item.description,
+        quantity: item.quantity || 1,
+        status: item.status || 'pending_info'
+      }));
+      
+      await supabaseAdmin.from('ticket_items').insert(itemsToInsert);
+    }
+
+    // If AI split into multiple tickets, create additional ones
+    if (parsed.tickets.length > 1) {
+      for (let i = 1; i < parsed.tickets.length; i++) {
+        const extraTicket = parsed.tickets[i];
+        
+        const { data: extraKNumber } = await supabaseAdmin.rpc('generate_k_number');
+        
+        const { data: newTicket, error: newTicketErr } = await supabaseAdmin
+          .from('tickets')
+          .insert({
+            k_number: extraKNumber,
+            group_code: groupCode,
+            raw_text: extraTicket.raw_text || combinedText,
+            item_count: extraTicket.item_count || 0,
+            length_class: extraTicket.length_class || 'short',
+            priority: extraTicket.priority || 'normal',
+            status: 'pending',
+            vin: extraTicket.vin || null,
+            vehicle_info: extraTicket.vehicle_info || null,
+            possible_grouping: extraTicket.possible_grouping || false,
+            entry_type: 'express',
+            bg_processing_status: 'completed',
+            parent_ticket_id: ticketId,
+            created_by: userId,
+            updated_by: userId
+          })
+          .select()
+          .single();
+
+        if (!newTicketErr && newTicket && extraTicket.items?.length > 0) {
+          const extraItems = extraTicket.items.map(item => ({
+            ticket_id: newTicket.id,
+            item_order: item.item_order,
+            raw_line: item.raw_line,
+            parsed_description: item.description,
+            quantity: item.quantity || 1,
+            status: item.status || 'pending_info'
+          }));
+          await supabaseAdmin.from('ticket_items').insert(extraItems);
+        }
+
+        if (!newTicketErr) {
+          await supabaseAdmin.from('audit_log').insert({
+            entity_type: 'ticket',
+            entity_id: newTicket.id,
+            action: 'create',
+            new_values: { source: 'express_split', k_number: extraKNumber, parent_ticket: ticketId },
+            performed_by: userId
+          });
+        }
+      }
+    }
+
+    // Run duplicate detection on the primary ticket
+    try {
+      const ticketDuplicates = await findDuplicates(primaryTicket, groupCode);
+      if (ticketDuplicates.length > 0) {
+        const bestDup = ticketDuplicates[0];
+        const dupUpdate = { duplicate_label: bestDup.label };
+        
+        if (bestDup.similarity >= 0.7) {
+          dupUpdate.status = 'en_revision';
+          if (bestDup.ticket?.assigned_to) {
+            dupUpdate.revision_origin_seller_id = bestDup.ticket.assigned_to;
+          }
+        }
+        
+        await supabaseAdmin.from('tickets').update(dupUpdate).eq('id', ticketId);
+        
+        for (const dup of ticketDuplicates) {
+          try {
+            await supabaseAdmin.from('duplicate_references').insert({
+              ticket_id: ticketId,
+              duplicate_ticket_id: dup.ticket.id,
+              similarity_score: Math.round(dup.similarity * 100),
+              label: dup.label
+            });
+          } catch { /* non-critical */ }
+        }
+      }
+    } catch (dupErr) {
+      console.error(`[EXPRESS-BG] Duplicate detection failed for ${ticketId}:`, dupErr.message);
+    }
+
+    // Audit log for background completion
+    await supabaseAdmin.from('audit_log').insert({
+      entity_type: 'ticket',
+      entity_id: ticketId,
+      action: 'express_bg_complete',
+      new_values: { 
+        items_parsed: primaryTicket.items?.length || 0,
+        extra_tickets: parsed.tickets.length - 1,
+        parse_notes: parsed.parse_notes
+      },
+      performed_by: userId
+    });
+
+    console.log(`[EXPRESS-BG] Ticket ${ticketId} processing completed: ${primaryTicket.items?.length || 0} items, ${parsed.tickets.length} total tickets`);
+
+  } catch (error) {
+    console.error(`[EXPRESS-BG] Error processing ticket ${ticketId}:`, error);
+    
+    // Mark as error — operator can review later
+    try {
+      await supabaseAdmin.from('tickets').update({
+        bg_processing_status: 'error',
+        bg_processing_error: error.message?.substring(0, 500) || 'Unknown error'
+      }).eq('id', ticketId);
+    } catch (updateErr) {
+      console.error(`[EXPRESS-BG] Failed to update error status for ${ticketId}:`, updateErr);
+    }
+  }
+}
+
 /**
  * POST /api/tickets/analyze-images
  * Send images to GPT-4o Vision to extract vehicle plate info and item text

@@ -54,7 +54,7 @@ export function generateCustomerProformaBlock(ticket, items) {
       '',
       'No hay artículos en este ticket.',
       '⚠ Precios sujetos a cambio sin previo aviso',
-    ].filter(Boolean).join('\n');
+    ].filter(s => s !== null && s !== undefined).join('\n');
   }
 
   // Sort items by status for client readability: available first, then verification, then unavailable
@@ -137,7 +137,7 @@ export function generateCustomerProformaBlock(ticket, items) {
   sections.push('💬 Quedo atento a su confirmación para coordinar despacho.');
   if (ticket.assigned_to_user) sections.push(`👤 Asesor comercial: ${ticket.assigned_to_user.full_name}`);
 
-  return sections.filter(Boolean).join('\n');
+  return sections.filter(s => s !== null && s !== undefined).join('\n');
 }
 
 /**
