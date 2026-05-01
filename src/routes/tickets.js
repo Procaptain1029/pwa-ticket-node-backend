@@ -144,7 +144,9 @@ const upload = multer({
       mime.startsWith('image/') ||
       mime.startsWith('audio/') ||
       mime.startsWith('video/') ||
-      mime === 'application/octet-stream'
+      mime === 'application/octet-stream' ||
+      mime === 'application/ogg' ||
+      mime === 'application/x-ogg'
     );
     if (isSupportedMedia) {
       cb(null, true);
@@ -171,7 +173,9 @@ const expressUpload = multer({
       mime.startsWith('image/') ||
       mime.startsWith('audio/') ||
       mime.startsWith('video/') ||
-      mime === 'application/octet-stream'
+      mime === 'application/octet-stream' ||
+      mime === 'application/ogg' ||
+      mime === 'application/x-ogg'
     );
     if (isSupportedMedia) {
       cb(null, true);
