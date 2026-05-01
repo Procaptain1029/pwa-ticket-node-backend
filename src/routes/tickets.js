@@ -138,9 +138,15 @@ const upload = multer({
   }),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB max
   fileFilter: (req, file, cb) => {
-    const allowedImage = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-    const allowedAudio = ['audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/wav', 'audio/m4a', 'audio/mp4', 'audio/x-m4a', 'audio/webm', 'audio/opus'];
-    if ([...allowedImage, ...allowedAudio].includes(file.mimetype)) {
+    const mime = (file.mimetype || '').toLowerCase();
+    // WhatsApp sometimes sends audio as application/octet-stream.
+    const isSupportedMedia = (
+      mime.startsWith('image/') ||
+      mime.startsWith('audio/') ||
+      mime.startsWith('video/') ||
+      mime === 'application/octet-stream'
+    );
+    if (isSupportedMedia) {
       cb(null, true);
     } else {
       cb(new Error(`Tipo de archivo no soportado: ${file.mimetype}`));
@@ -148,7 +154,7 @@ const upload = multer({
   }
 });
 
-// Multer config specifically for Express Entry (10MB limit, max 5 files)
+// Multer config specifically for Express Entry (10MB limit, max 5 media files)
 const expressUpload = multer({
   storage: multer.diskStorage({
     destination: os.tmpdir(),
@@ -159,9 +165,15 @@ const expressUpload = multer({
   }),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max per file
   fileFilter: (req, file, cb) => {
-    const allowedImage = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-    const allowedAudio = ['audio/mpeg', 'audio/mp3', 'audio/ogg', 'audio/wav', 'audio/m4a', 'audio/mp4', 'audio/x-m4a', 'audio/webm', 'audio/opus'];
-    if ([...allowedImage, ...allowedAudio].includes(file.mimetype)) {
+    const mime = (file.mimetype || '').toLowerCase();
+    // WhatsApp sometimes sends audio as application/octet-stream.
+    const isSupportedMedia = (
+      mime.startsWith('image/') ||
+      mime.startsWith('audio/') ||
+      mime.startsWith('video/') ||
+      mime === 'application/octet-stream'
+    );
+    if (isSupportedMedia) {
       cb(null, true);
     } else {
       cb(new Error(`Tipo de archivo no soportado: ${file.mimetype}`));
