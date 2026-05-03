@@ -628,7 +628,6 @@ async function processExpressTicketInBackground(ticketId, sharedText, attachment
  * Returns structured data that can populate the generate form
  */
 router.post('/analyze-images',
-  authenticate({ optional: true }), // Optional auth for service worker use
   upload.array('images', 10),
   asyncHandler(async (req, res) => {
     if (!req.files || req.files.length === 0) {
