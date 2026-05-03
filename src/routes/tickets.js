@@ -164,6 +164,7 @@ function cleanWhatsAppHeaders(text) {
     .filter(line => {
       const trimmed = line.trim();
       const whatsappPrefixes = [
+        // Spanish
         /^Foto de /i,
         /^Imagen de /i,
         /^Audio de /i,
@@ -171,6 +172,21 @@ function cleanWhatsAppHeaders(text) {
         /^Video de /i,
         /^GIF de /i,
         /^Sticker de /i,
+        // English
+        /^Photo from /i,
+        /^Image from /i,
+        /^Audio from /i,
+        /^Document from /i,
+        /^Video from /i,
+        /^GIF from /i,
+        // More flexible patterns
+        /^Foto /i,
+        /^Imagen /i,
+        /^Audio /i,
+        /^Documento /i,
+        /^Video /i,
+        /^Photo /i,
+        /^Image /i,
       ];
       return !whatsappPrefixes.some(regex => regex.test(trimmed));
     })
