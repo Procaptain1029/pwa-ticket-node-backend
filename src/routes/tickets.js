@@ -659,6 +659,43 @@ router.post('/analyze-images',
 );
 
 /**
+ * POST /api/tickets/transcribe-audio
+ * Transcribe audio files via Whisper — returns text only, no ticket creation.
+ * Used by Express Entry page to pre-fill the textarea with transcribed text.
+ */
+router.post('/transcribe-audio',
+  authorize(['operator', 'seller', 'dispatcher', 'admin']),
+  upload.array('audios', 5),
+  asyncHandler(async (req, res) => {
+    const files = req.files || [];
+    if (files.length === 0) {
+      return res.status(400).json({ error: 'No se subió archivo de audio', code: 'NO_FILE' });
+    }
+
+    const transcriptions = [];
+    for (const file of files) {
+      try {
+        const text = await transcribeAudio(file.path);
+        if (text && text.trim()) {
+          transcriptions.push(text.trim());
+        }
+      } catch (err) {
+        console.error(`[TRANSCRIBE] Failed to transcribe ${file.originalname}:`, err.message);
+      } finally {
+        try { fs.unlinkSync(file.path); } catch {}
+      }
+    }
+
+    const transcribedText = transcriptions.join('\n\n');
+
+    res.json({
+      transcribed_text: transcribedText,
+      audio_count: files.length
+    });
+  })
+);
+
+/**
  * POST /api/tickets/generate-from-audio
  * ONE-STEP: Upload audio → Whisper transcription → AI parse → create tickets
  * Operator uploads audio + group_code → gets created tickets back immediately
