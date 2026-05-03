@@ -156,6 +156,28 @@ const upload = multer({
   }
 });
 
+// Clean WhatsApp header prefixes from shared text
+function cleanWhatsAppHeaders(text) {
+  if (!text) return '';
+  return text
+    .split('\n')
+    .filter(line => {
+      const trimmed = line.trim();
+      const whatsappPrefixes = [
+        /^Foto de /i,
+        /^Imagen de /i,
+        /^Audio de /i,
+        /^Documento de /i,
+        /^Video de /i,
+        /^GIF de /i,
+        /^Sticker de /i,
+      ];
+      return !whatsappPrefixes.some(regex => regex.test(trimmed));
+    })
+    .join('\n')
+    .trim();
+}
+
 // Multer config specifically for Express Entry (10MB limit, max 5 media files)
 const expressUpload = multer({
   storage: multer.diskStorage({
@@ -216,7 +238,7 @@ router.post('/express',
     }
 
     const userId = req.user.id;
-    const sharedText = (req.body.shared_text || '').trim();
+    const sharedText = cleanWhatsAppHeaders((req.body.shared_text || '').trim());
     const files = req.files || [];
 
     // --- STEP 1: Quick save — create shell ticket immediately ---
@@ -310,18 +332,19 @@ router.post('/express',
 /**
  * Background processor for Express Entry tickets.
  * Runs AFTER the response has been sent to the operator.
- * 
+ *
  * Steps:
  *   1. Transcribe audio files (if any) via Whisper
- *   2. Combine all text sources
- *   3. Run AI ticket parser (same as /generate)
- *   4. Update ticket with parsed data (items, vehicle info, etc.)
- *   5. Run duplicate detection
- *   6. Update bg_processing_status to 'completed' or 'error'
+ *   2. Analyze images (if any) via GPT-4o Vision for vehicle info/matricula
+ *   3. Combine all text sources
+ *   4. Run AI ticket parser (same as /generate)
+ *   5. Update ticket with parsed data (items, vehicle info, etc.)
+ *   6. Run duplicate detection
+ *   7. Update bg_processing_status to 'completed' or 'error'
  */
 async function processExpressTicketInBackground(ticketId, sharedText, attachments, groupCode, userId) {
   console.log(`[EXPRESS-BG] Starting background processing for ticket ${ticketId}`);
-  
+
   try {
     // Mark as processing
     await supabaseAdmin.from('tickets').update({ bg_processing_status: 'processing' }).eq('id', ticketId);
@@ -334,13 +357,77 @@ async function processExpressTicketInBackground(ticketId, sharedText, attachment
     const imageAttachments = attachments.filter(a => a.mime_type?.startsWith('image/'));
     const audioAttachments = attachments.filter(a => a.mime_type?.startsWith('audio/'));
 
-    // Audio: NOT transcribing per client decision — just stored as attachments
-    // (If transcription is needed later, uncomment below)
-    // for (const audio of audioAttachments) { ... }
+    // Audio: Transcribe via Whisper
+    for (const audio of audioAttachments) {
+      try {
+        // Download audio file from Supabase Storage
+        const { data: fileData, error: downloadError } = await supabaseAdmin
+          .storage
+          .from('ticket-attachments')
+          .download(audio.storage_path);
 
-    // Images: NOT analyzing with AI — just stored as attachments per client decision
-    // (If image analysis is needed later, uncomment below)
-    // for (const img of imageAttachments) { ... }
+        if (downloadError) {
+          console.error(`[EXPRESS-BG] Failed to download audio ${audio.id}:`, downloadError);
+          continue;
+        }
+
+        // Convert to Buffer and save to temp file for Whisper
+        const audioBuffer = Buffer.from(await fileData.arrayBuffer());
+        const tempAudioPath = path.join(os.tmpdir(), `express-audio-${audio.id}-${Date.now()}.mp3`);
+        fs.writeFileSync(tempAudioPath, audioBuffer);
+
+        // Transcribe
+        const transcribedText = await transcribeAudio(tempAudioPath);
+        if (transcribedText && transcribedText.trim()) {
+          textParts.push(transcribedText.trim());
+        }
+
+        // Clean up temp file
+        try { fs.unlinkSync(tempAudioPath); } catch {}
+      } catch (err) {
+        console.error(`[EXPRESS-BG] Failed to transcribe audio ${audio.id}:`, err.message);
+      }
+    }
+
+    // Images: Analyze with GPT-4o Vision for vehicle info/matricula
+    let vehicleInfoFromImages = null;
+    if (imageAttachments.length > 0) {
+      try {
+        // Download images from Supabase Storage
+        const images = [];
+        for (const img of imageAttachments) {
+          try {
+            const { data: fileData, error: downloadError } = await supabaseAdmin
+              .storage
+              .from('ticket-attachments')
+              .download(img.storage_path);
+
+            if (downloadError) {
+              console.error(`[EXPRESS-BG] Failed to download image ${img.id}:`, downloadError);
+              continue;
+            }
+
+            images.push({
+              buffer: Buffer.from(await fileData.arrayBuffer()),
+              mimeType: img.mime_type
+            });
+          } catch (err) {
+            console.error(`[EXPRESS-BG] Failed to download image ${img.id}:`, err.message);
+          }
+        }
+
+        if (images.length > 0) {
+          const analysis = await analyzeMultipleImages(images);
+          vehicleInfoFromImages = analysis.vehicle_info;
+          // Also add extracted texts to text parts
+          if (analysis.extracted_texts && analysis.extracted_texts.length > 0) {
+            textParts.push(...analysis.extracted_texts.filter(t => t && t.trim()));
+          }
+        }
+      } catch (err) {
+        console.error(`[EXPRESS-BG] Failed to analyze images:`, err.message);
+      }
+    }
 
     // If we have text to parse, run the AI parser
     const combinedText = textParts.join('\n\n').trim();
@@ -372,7 +459,10 @@ async function processExpressTicketInBackground(ticketId, sharedText, attachment
     // Use the first parsed ticket to update the shell ticket
     // (Express entry = 1 share = 1 ticket, but if AI splits into multiple, create additional tickets)
     const primaryTicket = parsed.tickets[0];
-    
+
+    // Merge vehicle info: prefer image analysis (matricula) over text parser
+    const finalVehicleInfo = vehicleInfoFromImages || primaryTicket.vehicle_info || null;
+
     // Update the original ticket with parsed data
     const updateData = {
       raw_text: combinedText,
@@ -380,7 +470,7 @@ async function processExpressTicketInBackground(ticketId, sharedText, attachment
       length_class: primaryTicket.length_class || 'short',
       priority: primaryTicket.priority || 'normal',
       vin: primaryTicket.vin || null,
-      vehicle_info: primaryTicket.vehicle_info || null,
+      vehicle_info: finalVehicleInfo,
       possible_grouping: primaryTicket.possible_grouping || false,
       bg_processing_status: 'completed',
       updated_by: userId
