@@ -124,7 +124,7 @@ export function generateCustomerProformaBlock(ticket, items) {
   sections.push('');
 
   if (positiveItems.length > 0) {
-    sections.push(`💰 TOTAL: USD ${total.toFixed(2).replace('.', ',')}`);
+    sections.push(`💰 TOTAL: $${total.toFixed(2).replace('.', ',')} USD`);
   }
 
   if (hasDelivery) sections.push('🚚 despacho urgente (sujeto a horario de corte)');
