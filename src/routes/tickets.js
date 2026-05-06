@@ -2129,6 +2129,95 @@ router.put('/:ticketId/items/bulk-status',
 );
 
 /**
+ * PUT /api/tickets/:ticketId/items/bulk-quote
+ * Batch update multiple items with inline quote data (price, brand, note, status).
+ * Used by the "Cotización Rápida" (Quick Quote) feature.
+ */
+const bulkQuoteItemSchema = z.object({
+  id: z.string().uuid(),
+  selling_price: z.number().positive().optional().nullable(),
+  cost_price: z.number().positive().optional().nullable(),
+  brand: z.string().optional().nullable(),
+  seller_note: z.string().optional().nullable(),
+  status: z.enum(['positive', 'negative', 'pending_info', 'no_registra', 'no_registra_verificar']).optional(),
+  estimated_delivery: z.string().optional().nullable(),
+});
+
+const bulkQuoteSchema = z.object({
+  items: z.array(bulkQuoteItemSchema).min(1).max(100),
+});
+
+router.put('/:ticketId/items/bulk-quote',
+  authorize(['seller', 'dispatcher', 'admin']),
+  asyncHandler(async (req, res) => {
+    const { ticketId } = req.params;
+    const validated = bulkQuoteSchema.parse(req.body);
+    const userId = req.user.id;
+
+    // Check ticket exists and is not closed/cancelled
+    const { data: ticket, error: ticketErr } = await supabaseAdmin
+      .from('tickets')
+      .select('id, status')
+      .eq('id', ticketId)
+      .single();
+
+    if (ticketErr || !ticket) {
+      return res.status(404).json({ error: 'Ticket no encontrado', code: 'NOT_FOUND' });
+    }
+    if (['closed', 'cancelled'].includes(ticket.status)) {
+      return res.status(400).json({ error: 'No se pueden modificar ítems de un ticket cerrado o cancelado', code: 'TICKET_CLOSED' });
+    }
+
+    // Check ticket lock — allow pedido status without lock
+    if (!['pedido'].includes(ticket.status)) {
+      const lockStatus = await getLockStatus(ticketId);
+      if (lockStatus.locked && lockStatus.locked_by !== userId) {
+        return res.status(423).json({ error: 'Ticket is locked by another user', code: 'TICKET_LOCKED' });
+      }
+    }
+
+    // Update each item
+    const updatedItems = [];
+    for (const itemData of validated.items) {
+      const updatePayload = {};
+      if (itemData.status !== undefined) updatePayload.status = itemData.status;
+      if (itemData.selling_price !== undefined) updatePayload.selling_price = itemData.selling_price;
+      if (itemData.cost_price !== undefined) updatePayload.cost_price = itemData.cost_price;
+      if (itemData.brand !== undefined) updatePayload.brand = itemData.brand;
+      if (itemData.seller_note !== undefined) updatePayload.seller_note = itemData.seller_note;
+      if (itemData.estimated_delivery !== undefined) updatePayload.estimated_delivery = itemData.estimated_delivery;
+      updatePayload.updated_at = new Date().toISOString();
+
+      const { data: updated, error: updateErr } = await supabaseAdmin
+        .from('ticket_items')
+        .update(updatePayload)
+        .eq('id', itemData.id)
+        .eq('ticket_id', ticketId)
+        .select()
+        .single();
+
+      if (!updateErr && updated) {
+        updatedItems.push(updated);
+      }
+    }
+
+    // Audit log
+    await supabaseAdmin.from('audit_log').insert({
+      entity_type: 'ticket',
+      entity_id: ticketId,
+      action: 'bulk_quote',
+      new_values: { items_quoted: updatedItems.length },
+      performed_by: userId
+    });
+
+    res.json({
+      message: `${updatedItems.length} items cotizados`,
+      items: updatedItems
+    });
+  })
+);
+
+/**
  * POST /api/tickets/:ticketId/items/:itemId/alternatives
  * Add a brand/price alternative to an existing item
  */
