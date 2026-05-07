@@ -30,11 +30,14 @@ VEHICLE DETECTION RULES:
   Example: "SAIL 1500\nRotula\nTerminales" → vehicle_info.modelo="SAIL 1500", items=[Rotula, Terminales]
   Example: "COROLLA 1.8 XEI 2020\nBomba de aceite\nFiltro" → vehicle_info.modelo="COROLLA 1.8 XEI", vehicle_info.anio="2020", items=[Bomba de aceite, Filtro]
   Example: "NUEVO MAZDA3 AC 2.0 4P 4X2 TM\nRotula\nBomba de agua" → vehicle_info.modelo="NUEVO MAZDA3 AC 2.0 4P 4X2 TM", items=[Rotula, Bomba de agua]
+- CRITICAL: Scan the ENTIRE text for vehicle info, not just the first line. Vehicle info can be embedded in sentences.
+  Example: "TAL VEZ PARA EL PICANTO G4LA 2018 PISTONES +20" → vehicle_info.marca="KIA", vehicle_info.modelo="PICANTO G4LA", vehicle_info.anio="2018", items=[PISTONES +20]
+  Example: "para el CIVIC 2019 bomba de agua" → vehicle_info.marca="HONDA", vehicle_info.modelo="CIVIC", vehicle_info.anio="2019", items=[bomba de agua]
 - Also detect when vehicle info appears with "Modelo:", "Marca:", "Cilindraje:" labels (from image extraction):
   Example: "Modelo: SAIL 1500\nMarca: CHEVROLET\nCilindraje: 1500\nBomba de agua" → extract vehicle_info from labeled fields, items=[Bomba de agua]
 - ECUADOR MATRÍCULA / DOCUMENTO VEHICULAR: If the text has BOTH "Año modelo" / "AÑO MODELO" and a separate "Año:" / "AÑO" (without "modelo"), vehicle_info.anio MUST be the value from AÑO MODELO / año modelo (technical model year), NEVER the registration-only year. Example: "Año: 2023" and "Año modelo: 2011" → anio="2011".
-- Look for car brands: Toyota, Hyundai, Kia, Chevrolet, Nissan, Ford, Honda, Mazda, Suzuki, Mitsubishi, Chery, etc.
-- Look for models: Corolla, Hilux, Sportage, Accent, Tucson, Sail, Captiva, Spark, Aveo, Onix, Maxima, Civic, Mazda3, etc.
+- Look for car brands: Toyota, Hyundai, Kia, Chevrolet, Nissan, Ford, Honda, Mazda, Suzuki, Mitsubishi, Chery, Kia, etc.
+- Look for models: Corolla, Hilux, Sportage, Accent, Tucson, Sail, Captiva, Spark, Aveo, Onix, Maxima, Civic, Mazda3, Picanto, etc.
 - Look for years: 2015, 2018, 2019, 2020, etc.
 - Look for cilindraje: "1400", "1500", "1600", "1800", "1998", "2000", "2997", "1.4", "1.5", "1.6", "1.8", "2.0", "3.5" — always extract if present
 - Look for motor codes: alphanumeric codes like PE40628613, 2ZR-FE, F15S, G4EH, etc.
@@ -45,6 +48,7 @@ VEHICLE DETECTION RULES:
 - CRITICAL: "SAIL 1500" is vehicle info (modelo=SAIL, cilindraje=1500), NOT a part item
 - CRITICAL: "MAXIMA 3.5 SV 2019" is vehicle info (modelo=MAXIMA 3.5 SV, anio=2019), NOT a part item
 - CRITICAL: "CIVIC 1.5 TURBO EX 2020" is vehicle info (modelo=CIVIC 1.5 TURBO EX, anio=2020), NOT a part item
+- CRITICAL: "PICANTO G4LA 2018" is vehicle info (marca=KIA, modelo=PICANTO G4LA, anio=2018), NOT a part item
 
 FIELDS TO EXTRACT:
 - ALWAYS extract: marca, modelo, año, cilindraje, motor, placa (license plate)
@@ -182,7 +186,7 @@ function normalizeVehicleInfo(vehicleInfo) {
       else if (model.includes('MAXIMA') || model.includes('SENTRA') || model.includes('FRONTIER')) normalized.marca = 'NISSAN';
       else if (model.includes('CIVIC') || model.includes('CR-V') || model.includes('ACCORD')) normalized.marca = 'HONDA';
       else if (model.includes('ACCENT') || model.includes('TUCSON') || model.includes('ELANTRA')) normalized.marca = 'HYUNDAI';
-      else if (model.includes('SPORTAGE') || model.includes('RIO') || model.includes('CERATO')) normalized.marca = 'KIA';
+      else if (model.includes('SPORTAGE') || model.includes('RIO') || model.includes('CERATO') || model.includes('PICANTO')) normalized.marca = 'KIA';
     }
   }
   
