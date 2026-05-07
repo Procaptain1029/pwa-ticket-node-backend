@@ -2133,6 +2133,12 @@ router.put('/:ticketId/items/bulk-status',
  * Batch update multiple items with inline quote data (price, brand, note, status).
  * Used by the "Cotización Rápida" (Quick Quote) feature.
  */
+const bulkQuoteAlternativeSchema = z.object({
+  selling_price: z.number().positive().optional().nullable(),
+  brand: z.string().optional().nullable(),
+  note: z.string().optional().nullable(),
+});
+
 const bulkQuoteItemSchema = z.object({
   id: z.string().uuid(),
   selling_price: z.number().positive().optional().nullable(),
@@ -2141,6 +2147,7 @@ const bulkQuoteItemSchema = z.object({
   seller_note: z.string().optional().nullable(),
   status: z.enum(['positive', 'negative', 'pending_info', 'no_registra', 'no_registra_verificar']).optional(),
   estimated_delivery: z.string().optional().nullable(),
+  alternatives: z.array(bulkQuoteAlternativeSchema).optional(),
 });
 
 const bulkQuoteSchema = z.object({
@@ -2197,6 +2204,32 @@ router.put('/:ticketId/items/bulk-quote',
         .single();
 
       if (!updateErr && updated) {
+        // Handle alternatives - delete existing and create new ones
+        if (itemData.alternatives && itemData.alternatives.length > 0) {
+          // Delete existing alternatives
+          await supabaseAdmin
+            .from('item_alternatives')
+            .delete()
+            .eq('item_id', itemData.id);
+
+          // Create new alternatives
+          const alternativesToInsert = itemData.alternatives
+            .filter(alt => alt.brand && alt.selling_price)
+            .map(alt => ({
+              item_id: itemData.id,
+              brand: alt.brand,
+              selling_price: alt.selling_price,
+              notes: alt.note || null,
+              created_at: new Date().toISOString(),
+            }));
+
+          if (alternativesToInsert.length > 0) {
+            await supabaseAdmin
+              .from('item_alternatives')
+              .insert(alternativesToInsert);
+          }
+        }
+
         updatedItems.push(updated);
       }
     }
