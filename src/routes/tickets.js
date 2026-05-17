@@ -257,24 +257,184 @@ router.post('/express',
     const sharedText = cleanWhatsAppHeaders((req.body.shared_text || '').trim());
     const files = req.files || [];
 
-    // --- STEP 1: Quick save — create shell ticket immediately ---
-    const { data: kNumberResult, error: kError } = await supabaseAdmin
-      .rpc('generate_k_number');
-    if (kError) throw kError;
-    const kNumber = kNumberResult;
+    // Upload attachments first (store files, no AI — frontend already analyzed media)
+    const attachmentResults = [];
+    const tempTicketId = null; // will attach after ticket creation
 
+    // --- Synchronous AI parsing (same pipeline as /generate) ---
+    // The frontend already transcribes audio and analyzes images before submitting,
+    // so sharedText contains all extracted text including vehicle info from OCR.
+    
+    if (!sharedText) {
+      // No text — just create a shell ticket with attachments
+      const { data: kNumberResult, error: kError } = await supabaseAdmin.rpc('generate_k_number');
+      if (kError) throw kError;
+
+      const { data: ticket, error: ticketError } = await supabaseAdmin
+        .from('tickets')
+        .insert({
+          k_number: kNumberResult,
+          group_code: groupCode.trim(),
+          raw_text: '[Express - contenido en adjuntos]',
+          item_count: 0,
+          length_class: 'short',
+          priority: 'normal',
+          status: 'pending',
+          entry_type: 'express',
+          bg_processing_status: 'completed',
+          created_by: userId,
+          updated_by: userId
+        })
+        .select()
+        .single();
+
+      if (ticketError) {
+        for (const f of files) { try { fs.unlinkSync(f.path); } catch {} }
+        throw ticketError;
+      }
+
+      // Upload attachments
+      for (const file of files) {
+        try {
+          const fileBuffer = fs.readFileSync(file.path);
+          const attachment = await uploadAttachment(fileBuffer, file.originalname, file.mimetype, file.size, ticket.id, userId);
+          attachmentResults.push(attachment);
+        } catch (err) {
+          console.error(`[EXPRESS] Failed to upload attachment ${file.originalname}:`, err.message);
+        } finally {
+          try { fs.unlinkSync(file.path); } catch {}
+        }
+      }
+
+      await supabaseAdmin.from('audit_log').insert({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        action: 'create',
+        new_values: { source: 'express', k_number: kNumberResult, group_code: groupCode.trim(), attachments: attachmentResults.length },
+        performed_by: userId
+      });
+
+      return res.status(201).json({
+        message: `✅ Ticket #${kNumberResult} creado`,
+        ticket: {
+          id: ticket.id,
+          k_number: kNumberResult,
+          group_code: groupCode.trim(),
+          status: 'pending',
+          entry_type: 'express',
+          bg_processing_status: 'completed',
+          attachments: attachmentResults.length,
+        }
+      });
+    }
+
+    // --- Has text: run full AI parse synchronously (same as /generate) ---
+    const parsed = await parseTicketText(sharedText, groupCode.trim());
+
+    if (!parsed.tickets || parsed.tickets.length === 0) {
+      // Parser returned nothing — create ticket with raw text only
+      const { data: kNumberResult, error: kError } = await supabaseAdmin.rpc('generate_k_number');
+      if (kError) throw kError;
+
+      const { data: ticket, error: ticketError } = await supabaseAdmin
+        .from('tickets')
+        .insert({
+          k_number: kNumberResult,
+          group_code: groupCode.trim(),
+          raw_text: sharedText,
+          item_count: 0,
+          length_class: 'short',
+          priority: 'normal',
+          status: 'pending',
+          entry_type: 'express',
+          bg_processing_status: 'completed',
+          created_by: userId,
+          updated_by: userId
+        })
+        .select()
+        .single();
+
+      if (ticketError) {
+        for (const f of files) { try { fs.unlinkSync(f.path); } catch {} }
+        throw ticketError;
+      }
+
+      for (const file of files) {
+        try {
+          const fileBuffer = fs.readFileSync(file.path);
+          const attachment = await uploadAttachment(fileBuffer, file.originalname, file.mimetype, file.size, ticket.id, userId);
+          attachmentResults.push(attachment);
+        } catch (err) {
+          console.error(`[EXPRESS] Failed to upload attachment ${file.originalname}:`, err.message);
+        } finally {
+          try { fs.unlinkSync(file.path); } catch {}
+        }
+      }
+
+      await supabaseAdmin.from('audit_log').insert({
+        entity_type: 'ticket',
+        entity_id: ticket.id,
+        action: 'create',
+        new_values: { source: 'express', k_number: kNumberResult, group_code: groupCode.trim() },
+        performed_by: userId
+      });
+
+      return res.status(201).json({
+        message: `✅ Ticket #${kNumberResult} creado`,
+        ticket: {
+          id: ticket.id,
+          k_number: kNumberResult,
+          group_code: groupCode.trim(),
+          status: 'pending',
+          entry_type: 'express',
+          bg_processing_status: 'completed',
+          attachments: attachmentResults.length,
+        }
+      });
+    }
+
+    // Use first parsed ticket as primary
+    const primaryTicket = parsed.tickets[0];
+
+    // Generate K-number
+    const { data: kNumberResult, error: kError } = await supabaseAdmin.rpc('generate_k_number');
+    if (kError) throw kError;
+
+    // Duplicate detection
+    const ticketDuplicates = await findDuplicates(primaryTicket, groupCode.trim());
+    let duplicateLabel = null;
+    let initialStatus = 'pending';
+    let revisionOriginSellerId = null;
+
+    if (ticketDuplicates.length > 0) {
+      const bestDup = ticketDuplicates[0];
+      duplicateLabel = bestDup.label;
+      if (bestDup.similarity >= 0.7) {
+        initialStatus = 'en_revision';
+        if (bestDup.ticket?.assigned_to) {
+          revisionOriginSellerId = bestDup.ticket.assigned_to;
+        }
+      }
+    }
+
+    // Create the ticket with full parsed data (vehicle_info, items, etc.)
     const { data: ticket, error: ticketError } = await supabaseAdmin
       .from('tickets')
       .insert({
-        k_number: kNumber,
+        k_number: kNumberResult,
         group_code: groupCode.trim(),
-        raw_text: sharedText || '[Express - contenido en adjuntos]',
-        item_count: 0,
-        length_class: 'short',
-        priority: 'normal',
-        status: 'pending',
+        raw_text: sharedText,
+        item_count: primaryTicket.item_count || 0,
+        length_class: primaryTicket.length_class || 'short',
+        priority: primaryTicket.priority || 'normal',
+        status: initialStatus,
+        vin: primaryTicket.vin || null,
+        vehicle_info: primaryTicket.vehicle_info || null,
+        possible_grouping: primaryTicket.possible_grouping || false,
+        duplicate_label: duplicateLabel,
+        revision_origin_seller_id: revisionOriginSellerId,
         entry_type: 'express',
-        bg_processing_status: 'pending',
+        bg_processing_status: 'completed',
         created_by: userId,
         updated_by: userId
       })
@@ -282,29 +442,89 @@ router.post('/express',
       .single();
 
     if (ticketError) {
-      // Clean up temp files on failure
       for (const f of files) { try { fs.unlinkSync(f.path); } catch {} }
       throw ticketError;
     }
 
-    // Upload attachments (quick — just store files, no AI)
-    const attachmentResults = [];
+    // Create items
+    if (primaryTicket.items && primaryTicket.items.length > 0) {
+      const itemsToInsert = primaryTicket.items.map(item => ({
+        ticket_id: ticket.id,
+        item_order: item.item_order,
+        raw_line: item.raw_line,
+        parsed_description: item.description,
+        quantity: item.quantity || 1,
+        status: item.status || 'pending_info'
+      }));
+      await supabaseAdmin.from('ticket_items').insert(itemsToInsert);
+    }
+
+    // Store duplicate references
+    if (ticketDuplicates.length > 0) {
+      for (const dup of ticketDuplicates) {
+        try {
+          await supabaseAdmin.from('duplicate_references').insert({
+            ticket_id: ticket.id,
+            duplicate_ticket_id: dup.ticket.id,
+            similarity_score: Math.round(dup.similarity * 100),
+            label: dup.label
+          });
+        } catch { /* non-critical */ }
+      }
+    }
+
+    // Upload attachments
     for (const file of files) {
       try {
         const fileBuffer = fs.readFileSync(file.path);
-        const attachment = await uploadAttachment(
-          fileBuffer, 
-          file.originalname, 
-          file.mimetype, 
-          file.size, 
-          ticket.id, 
-          userId
-        );
+        const attachment = await uploadAttachment(fileBuffer, file.originalname, file.mimetype, file.size, ticket.id, userId);
         attachmentResults.push(attachment);
       } catch (err) {
         console.error(`[EXPRESS] Failed to upload attachment ${file.originalname}:`, err.message);
       } finally {
         try { fs.unlinkSync(file.path); } catch {}
+      }
+    }
+
+    // If AI split into multiple tickets, create additional ones
+    if (parsed.tickets.length > 1) {
+      for (let i = 1; i < parsed.tickets.length; i++) {
+        const extraTicket = parsed.tickets[i];
+        const { data: extraKNumber } = await supabaseAdmin.rpc('generate_k_number');
+
+        const { data: newTicket, error: newTicketErr } = await supabaseAdmin
+          .from('tickets')
+          .insert({
+            k_number: extraKNumber,
+            group_code: groupCode.trim(),
+            raw_text: extraTicket.raw_text || sharedText,
+            item_count: extraTicket.item_count || 0,
+            length_class: extraTicket.length_class || 'short',
+            priority: extraTicket.priority || 'normal',
+            status: 'pending',
+            vin: extraTicket.vin || null,
+            vehicle_info: extraTicket.vehicle_info || null,
+            possible_grouping: extraTicket.possible_grouping || false,
+            entry_type: 'express',
+            bg_processing_status: 'completed',
+            parent_ticket_id: ticket.id,
+            created_by: userId,
+            updated_by: userId
+          })
+          .select()
+          .single();
+
+        if (!newTicketErr && newTicket && extraTicket.items?.length > 0) {
+          const extraItems = extraTicket.items.map(item => ({
+            ticket_id: newTicket.id,
+            item_order: item.item_order,
+            raw_line: item.raw_line,
+            parsed_description: item.description,
+            quantity: item.quantity || 1,
+            status: item.status || 'pending_info'
+          }));
+          await supabaseAdmin.from('ticket_items').insert(extraItems);
+        }
       }
     }
 
@@ -315,33 +535,29 @@ router.post('/express',
       action: 'create',
       new_values: { 
         source: 'express', 
-        k_number: kNumber, 
+        k_number: kNumberResult, 
         group_code: groupCode.trim(),
         attachments: attachmentResults.length,
-        has_text: !!sharedText
+        items_parsed: primaryTicket.items?.length || 0,
+        extra_tickets: parsed.tickets.length - 1,
+        duplicates_found: ticketDuplicates.length,
+        initial_status: initialStatus
       },
       performed_by: userId
     });
 
-    // --- STEP 2: Return immediately so operator can go back to WhatsApp ---
     res.status(201).json({
-      message: `✅ Ticket #${kNumber} creado`,
+      message: `✅ Ticket #${kNumberResult} creado`,
       ticket: {
         id: ticket.id,
-        k_number: kNumber,
+        k_number: kNumberResult,
         group_code: groupCode.trim(),
-        status: 'pending',
+        status: initialStatus,
         entry_type: 'express',
-        bg_processing_status: 'pending',
+        bg_processing_status: 'completed',
         attachments: attachmentResults.length,
       }
     });
-
-    // --- STEP 3: Background processing (fire-and-forget) ---
-    processExpressTicketInBackground(ticket.id, sharedText, attachmentResults, groupCode.trim(), userId)
-      .catch(err => {
-        console.error(`[EXPRESS-BG] Background processing failed for ticket ${ticket.id}:`, err);
-      });
   })
 );
 
