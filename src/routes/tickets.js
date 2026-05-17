@@ -722,15 +722,16 @@ router.post('/generate-from-audio',
     // Step 1: Whisper transcription for each audio file
     const transcriptions = [];
     for (const file of files) {
-      const text = await transcribeAudio(file.path);
-      if (text && text.trim()) {
-        transcriptions.push(text.trim());
+      try {
+        const text = await transcribeAudio(file.path);
+        if (text && text.trim()) {
+          transcriptions.push(text.trim());
+        }
+      } catch (err) {
+        console.error(`[GENERATE-AUDIO] Failed to transcribe ${file.originalname}:`, err.message);
+      } finally {
+        try { fs.unlinkSync(file.path); } catch {}
       }
-    }
-
-    // Clean up temp audio files
-    for (const file of files) {
-      try { fs.unlinkSync(file.path); } catch {}
     }
 
     const transcribedText = transcriptions.join('\n\n');
