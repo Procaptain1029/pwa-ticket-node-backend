@@ -66,6 +66,7 @@ const updateTicketSchema = z.object({
  * Role-based transition rules per client spec §1:
  *   Operador: cannot change status (generate only)
  *   Vendedor: can transition to in_progress (via Take), ready, pedido, closed (only own tickets)
+ *   Vendedor: can take/manage en_revision duplicates (take, release, copy base)
  *   Dispatcher: can manage en_revision, validate pedido, cannot close
  *   Admin: full control, can also unmerge
  */
@@ -90,8 +91,8 @@ const TRANSITION_ROLES = {
   // Dispatcher transitions
   'pending→en_revision': ['dispatcher', 'admin'],
   'pending_review→en_revision': ['dispatcher', 'admin'],
-  'en_revision→pending': ['dispatcher', 'admin'],
-  'en_revision→in_progress': ['dispatcher', 'admin'],
+  'en_revision→pending': ['seller', 'dispatcher', 'admin'],
+  'en_revision→in_progress': ['seller', 'dispatcher', 'admin'],
   // General
   'pending→in_progress': ['seller', 'dispatcher', 'admin'],
   'pending_review→in_progress': ['seller', 'dispatcher', 'admin'],
@@ -1778,9 +1779,9 @@ router.get('/', asyncHandler(async (req, res) => {
   
   // Per client spec §1: Seller only sees their own assigned tickets
   // (except pending tickets which are available for anyone to take)
-  // Also: sellers see en_revision tickets where they are the origin seller
+  // Sellers: pending queue + all duplicate-review tickets + own assignments
   if (userRole === 'seller') {
-    query = query.or(`status.eq.pending,status.eq.pending_review,assigned_to.eq.${userId},revision_origin_seller_id.eq.${userId}`);
+    query = query.or(`status.eq.pending,status.eq.pending_review,status.eq.en_revision,assigned_to.eq.${userId},revision_origin_seller_id.eq.${userId}`);
   }
   
   // Per client spec §1: Operator cannot see ticket work queue (generate only)
@@ -2012,14 +2013,6 @@ router.put('/:id',
       }
     }
     
-    // Sellers cannot modify en_revision tickets (only dispatcher/admin can)
-    if (userRole === 'seller' && currentTicket.status === 'en_revision') {
-      return res.status(403).json({
-        error: 'Este ticket está en revisión. Solo un Dispatcher o Admin puede gestionarlo.',
-        code: 'EN_REVISION_BLOCKED'
-      });
-    }
-    
     // --- Enforce status transition rules per client spec §1-§2 ---
     if (validated.status && validated.status !== currentTicket.status) {
       const fromStatus = currentTicket.status;
@@ -2148,9 +2141,6 @@ router.post('/:id/take',
     if (currentTicket.assigned_to && currentTicket.assigned_to !== userId) {
       return res.status(423).json({ error: 'Este ticket ya fue tomado por otro vendedor', code: 'ALREADY_TAKEN' });
     }
-    if (req.user.role === 'seller' && currentTicket.status === 'en_revision') {
-      return res.status(403).json({ error: 'Este ticket está en revisión y no puede ser tomado', code: 'EN_REVISION_BLOCKED' });
-    }
     // Check lock inline (skip separate acquireLock fetch)
     if (currentTicket.locked_by && currentTicket.locked_by !== userId && new Date(currentTicket.lock_expires_at) > now) {
       return res.status(423).json({ error: 'Ticket is locked by another user', code: 'LOCKED_BY_OTHER' });
@@ -2169,7 +2159,7 @@ router.post('/:id/take',
       assigned_at: now.toISOString(),
       updated_by: userId
     };
-    if (currentTicket.status === 'pending' || currentTicket.status === 'pending_review') {
+    if (['pending', 'pending_review', 'en_revision'].includes(currentTicket.status)) {
       updateData.status = 'in_progress';
     }
     
@@ -2225,10 +2215,10 @@ router.post('/:id/release',
       return res.status(400).json(result);
     }
     
-    // Per client spec: releasing a ticket sends it back to 'pending'
-    // so another seller can pick it up (not left stuck in 'in_progress')
+    // Per client spec: releasing sends ticket back to 'pending'
+    // (in_progress or en_revision duplicate — not left stuck)
     const ticket = result.ticket;
-    if (ticket.status === 'in_progress') {
+    if (ticket.status === 'in_progress' || ticket.status === 'en_revision') {
       const { data: updatedTicket } = await supabaseAdmin
         .from('tickets')
         .update({
@@ -2248,7 +2238,7 @@ router.post('/:id/release',
         entity_type: 'ticket',
         entity_id: id,
         action: 'release_to_pending',
-        new_values: { previous_status: 'in_progress', new_status: 'pending' },
+        new_values: { previous_status: ticket.status, new_status: 'pending' },
         performed_by: userId
       });
       
@@ -2660,13 +2650,6 @@ router.put('/:ticketId/items/:itemId',
       .eq('id', ticketId)
       .single();
     
-    if (parentTicket && parentTicket.status === 'en_revision' && req.user.role === 'seller') {
-      return res.status(403).json({
-        error: 'Este ticket está en revisión. Solo un Dispatcher o Admin puede gestionarlo.',
-        code: 'EN_REVISION_BLOCKED'
-      });
-    }
-    
     // In pedido status, allow editing without lock (seller fills supplier/cost before closing)
     const isPedido = parentTicket && parentTicket.status === 'pedido';
     if (!isPedido) {
@@ -2746,11 +2729,6 @@ router.delete('/:ticketId/items/:itemId',
       return res.status(404).json({ error: 'Ticket not found', code: 'NOT_FOUND' });
     }
 
-    // Sellers cannot delete items on en_revision tickets
-    if (ticket.status === 'en_revision' && req.user.role === 'seller') {
-      return res.status(403).json({ error: 'Este ticket está en revisión.', code: 'EN_REVISION_BLOCKED' });
-    }
-
     // Check lock
     if (ticket.locked_by && ticket.locked_by !== userId && req.user.role !== 'admin' && req.user.role !== 'dispatcher') {
       if (new Date(ticket.lock_expires_at) > new Date()) {
@@ -2806,9 +2784,20 @@ router.post('/:id/use-as-base/:sourceId',
     const { id: targetId, sourceId } = req.params;
     const userId = req.user.id;
     
-    // Verify lock on target ticket
+    const { data: targetTicket } = await supabaseAdmin
+      .from('tickets')
+      .select('id, k_number, group_code, status, locked_by, lock_expires_at')
+      .eq('id', targetId)
+      .single();
+
+    if (!targetTicket) {
+      return res.status(404).json({ error: 'Ticket not found', code: 'NOT_FOUND' });
+    }
+
+    // Duplicate review: seller may copy base without holding the lock yet
     const lockStatus = await getLockStatus(targetId);
-    if (lockStatus.locked && lockStatus.locked_by !== userId) {
+    const skipLockForDupReview = targetTicket.status === 'en_revision' && req.user.role === 'seller';
+    if (lockStatus.locked && lockStatus.locked_by !== userId && !skipLockForDupReview) {
       return res.status(423).json({
         error: 'Ticket is locked by another user',
         code: 'TICKET_LOCKED'
@@ -2912,13 +2901,6 @@ router.post('/:id/use-as-base/:sourceId',
     }
     
     // Auto-transition source ticket to 'reenviado'
-    // Get target ticket info for the forwarding reference
-    const { data: targetTicket } = await supabaseAdmin
-      .from('tickets')
-      .select('id, k_number, group_code')
-      .eq('id', targetId)
-      .single();
-    
     const { data: sourceTicketData } = await supabaseAdmin
       .from('tickets')
       .select('status, k_number')
