@@ -918,7 +918,7 @@ router.post('/transcribe-audio',
  * Operator uploads audio + group_code → gets created tickets back immediately
  */
 router.post('/generate-from-audio',
-  authorize(['operator', 'admin']),
+  authorize(['operator', 'seller', 'admin']),
   upload.array('audios', 10),
   asyncHandler(async (req, res) => {
     // Support both single 'audio' field (legacy) and multiple 'audios' field
@@ -1081,7 +1081,7 @@ router.post('/generate-from-audio',
  * Main entry point - "GENERAR TICKETS" button
  */
 router.post('/generate', 
-  authorize(['operator', 'admin']),
+  authorize(['operator', 'seller', 'admin']),
   asyncHandler(async (req, res) => {
     const validated = createTicketSchema.parse(req.body);
     const userId = req.user.id;
