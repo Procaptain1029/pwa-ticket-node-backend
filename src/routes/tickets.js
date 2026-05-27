@@ -1747,6 +1747,55 @@ router.get('/alerts/pending',
 );
 
 /**
+ * DELETE /api/tickets/bulk
+ * Bulk delete tickets (admin + operator only)
+ * Body: { ticket_ids: string[] }
+ */
+router.delete('/bulk',
+  authorize(['admin', 'operator']),
+  asyncHandler(async (req, res) => {
+    const { ticket_ids } = req.body;
+
+    if (!ticket_ids || !Array.isArray(ticket_ids) || ticket_ids.length === 0) {
+      return res.status(400).json({ error: 'Se requiere al menos un ticket para eliminar', code: 'NO_TICKETS' });
+    }
+
+    if (ticket_ids.length > 100) {
+      return res.status(400).json({ error: 'Máximo 100 tickets por operación', code: 'TOO_MANY' });
+    }
+
+    const userId = req.user.id;
+
+    // Delete related data first (cascade)
+    await supabaseAdmin.from('ticket_items').delete().in('ticket_id', ticket_ids);
+    await supabaseAdmin.from('duplicate_references').delete().or(
+      ticket_ids.map(id => `ticket_id.eq.${id},duplicate_ticket_id.eq.${id}`).join(',')
+    );
+    await supabaseAdmin.from('ticket_attachments').delete().in('ticket_id', ticket_ids);
+    await supabaseAdmin.from('audit_log').delete().eq('entity_type', 'ticket').in('entity_id', ticket_ids);
+
+    // Delete tickets
+    const { error, count } = await supabaseAdmin
+      .from('tickets')
+      .delete({ count: 'exact' })
+      .in('id', ticket_ids);
+
+    if (error) throw error;
+
+    // Log the bulk delete action
+    await supabaseAdmin.from('audit_log').insert({
+      entity_type: 'ticket',
+      entity_id: ticket_ids[0],
+      action: 'bulk_delete',
+      new_values: { deleted_count: count, ticket_ids },
+      performed_by: userId
+    });
+
+    res.json({ message: `${count} ticket(s) eliminado(s)`, deleted_count: count });
+  })
+);
+
+/**
  * GET /api/tickets
  * List tickets with pagination and filters
  */
