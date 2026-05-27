@@ -200,12 +200,141 @@ function normalizeVehicleInfo(vehicleInfo) {
 }
 
 /**
+ * Split compound items joined by conjunctions ("y", "e", "&")
+ * E.g. "Pistones y rines +30" → ["Pistones +30", "Rines +30"]
+ * Rules:
+ * - Apply trailing measurement/qualifier to both split items
+ * - If a standalone measurement line follows an item, merge it first then split
+ * - Don't split if exclusion words present (kit, juego, combo, completo, set)
+ * - Detect shared prefix pattern: "Chaquetas de biela y bancada" → both get "Chaquetas de"
+ */
+function splitCompoundItems(items) {
+  if (!items || items.length === 0) return items;
+
+  // Exclusion words — never split these
+  const NO_SPLIT = /\b(kit|juego|combo|completo|set)\b/i;
+
+  // Conjunction pattern (word-boundary " y ", " e ", " & ")
+  const CONJUNCTION = /\s+(?:y|e|&)\s+/i;
+
+  // Trailing measurement/qualifier at the end of a string
+  // Matches: +20, +030, 020, 030, STD, LH, RH (with leading space)
+  const TRAILING_MEASURE = /\s+(\+\d{2,3}|0[1-9]\d|STD|LH|RH)$/i;
+
+  // A line that is ONLY a measurement (to merge with previous item)
+  const STANDALONE_MEASURE = /^(\+\d{2,3}|0[1-9]\d|STD)$/i;
+
+  // --- Pre-pass: merge standalone measurement lines with previous item ---
+  const merged = [];
+  for (let i = 0; i < items.length; i++) {
+    const desc = (items[i].description || items[i].raw_line || '').trim();
+    if (STANDALONE_MEASURE.test(desc) && merged.length > 0) {
+      const prev = merged[merged.length - 1];
+      prev.description = `${prev.description} ${desc}`;
+      prev.raw_line = `${prev.raw_line || prev.description}`;
+    } else {
+      merged.push({ ...items[i] });
+    }
+  }
+
+  // --- Split pass ---
+  const result = [];
+  for (const item of merged) {
+    const desc = (item.description || '').trim();
+
+    // Skip if exclusion words present
+    if (NO_SPLIT.test(desc)) {
+      result.push(item);
+      continue;
+    }
+
+    // Check for conjunction
+    if (!CONJUNCTION.test(desc)) {
+      result.push(item);
+      continue;
+    }
+
+    // Split on first conjunction only
+    const conjMatch = desc.match(CONJUNCTION);
+    if (!conjMatch) { result.push(item); continue; }
+
+    const splitIdx = conjMatch.index;
+    let leftPart = desc.slice(0, splitIdx).trim();
+    let rightPart = desc.slice(splitIdx + conjMatch[0].length).trim();
+
+    // If split produced empty parts, skip
+    if (!leftPart || !rightPart) {
+      result.push(item);
+      continue;
+    }
+
+    // Extract trailing measurement/qualifier from the rightmost part
+    let trailingMeasure = '';
+    const measureMatch = rightPart.match(TRAILING_MEASURE);
+    if (measureMatch) {
+      trailingMeasure = measureMatch[1];
+      rightPart = rightPart.slice(0, measureMatch.index).trim();
+    } else {
+      // Check if measure is at end of left part (less common)
+      const leftMeasure = leftPart.match(TRAILING_MEASURE);
+      if (leftMeasure) {
+        trailingMeasure = leftMeasure[1];
+        leftPart = leftPart.slice(0, leftMeasure.index).trim();
+      }
+    }
+
+    // Detect shared prefix pattern: "[PREFIX] de [SUBTYPE]" y [OTHER_SUBTYPE]
+    // e.g. "Chaquetas de biela" y "bancada" → prefix = "Chaquetas de"
+    const prefixMatch = leftPart.match(/^(.+\s+de)\s+(.+)$/i);
+    let item1Desc, item2Desc;
+
+    if (prefixMatch && rightPart.split(/\s+/).length <= 2) {
+      // Shared prefix case
+      const sharedPrefix = prefixMatch[1]; // e.g. "Chaquetas de"
+      item1Desc = leftPart;
+      item2Desc = `${sharedPrefix} ${rightPart}`;
+    } else {
+      // Simple split: both parts are standalone
+      item1Desc = leftPart;
+      item2Desc = rightPart;
+    }
+
+    // Apply trailing measurement to both items
+    if (trailingMeasure) {
+      item1Desc = `${item1Desc} ${trailingMeasure}`;
+      item2Desc = `${item2Desc} ${trailingMeasure}`;
+    }
+
+    // Create two items from the original
+    result.push({
+      ...item,
+      raw_line: item.raw_line || desc,
+      description: item1Desc,
+    });
+    result.push({
+      ...item,
+      raw_line: item.raw_line || desc,
+      description: item2Desc,
+    });
+  }
+
+  // Re-number item_order
+  return result.map((item, index) => ({
+    ...item,
+    item_order: index + 1
+  }));
+}
+
+/**
  * Enhance parsed tickets with additional computed fields
  */
 function enhanceParsedTickets(parsed, groupCode, originalRawText) {
   const tickets = parsed.tickets.map((ticket, index) => {
-    // Recalculate item count
-    const itemCount = ticket.items?.length || 0;
+    // Split compound items (e.g. "Pistones y rines +30" → 2 items)
+    const expandedItems = splitCompoundItems(ticket.items || []);
+
+    // Recalculate item count after split
+    const itemCount = expandedItems.length || 0;
     
     // Normalize vehicle info (fix Ecuador matrícula: año modelo vs año registro)
     let vehicleForNorm = ticket.vehicle_info ? { ...ticket.vehicle_info } : {};
@@ -225,7 +354,7 @@ function enhanceParsedTickets(parsed, groupCode, originalRawText) {
       : 'normal';
     
     // Mark low confidence tickets for review
-    const needsReview = ticket.confidence < 0.7 || !ticket.items?.length;
+    const needsReview = ticket.confidence < 0.7 || !expandedItems.length;
     
     return {
       ...ticket,
@@ -236,7 +365,7 @@ function enhanceParsedTickets(parsed, groupCode, originalRawText) {
       status: needsReview ? 'pending_review' : 'in_progress',
       possible_grouping: ticket.possible_grouping || false,
       vehicle_info: normalizedVehicle,
-      items: (ticket.items || []).map((item, itemIndex) => ({
+      items: expandedItems.map((item, itemIndex) => ({
         ...item,
         item_order: itemIndex + 1,
         quantity: item.quantity || 1,
@@ -314,4 +443,5 @@ export function extractPlate(text) {
   return null;
 }
 
-export default { parseTicketText, extractVIN, extractPlate };
+export { splitCompoundItems };
+export default { parseTicketText, extractVIN, extractPlate, splitCompoundItems };
