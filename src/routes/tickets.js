@@ -1755,7 +1755,7 @@ router.get('/', asyncHandler(async (req, res) => {
     page = 1, 
     limit = 20, 
     status, 
-    priority, 
+    carril,
     group_code,
     search,
     sort_by = 'created_at',
@@ -1800,7 +1800,14 @@ router.get('/', asyncHandler(async (req, res) => {
     query = query.not('status', 'in', '("closed","cancelled","reenviado")');
   }
   // status === 'all' → no filter applied, returns everything
-  if (priority) query = query.eq('priority', priority);
+  // Carril filter: C0 = 1 item, C1 = 2–3 items, C2 = 4+ items
+  if (carril === 'C0') {
+    query = query.lte('item_count', 1);
+  } else if (carril === 'C1') {
+    query = query.gte('item_count', 2).lte('item_count', 3);
+  } else if (carril === 'C2') {
+    query = query.gte('item_count', 4);
+  }
   if (group_code) query = query.eq('group_code', group_code);
   if (search) query = query.ilike('k_number', `%${search}%`);
   if (assigned_to) query = query.eq('assigned_to', assigned_to);
