@@ -14,6 +14,7 @@ import biblioRoutes from './routes/biblio.js';
 import userRoutes from './routes/users.js';
 import groupRoutes from './routes/groups.js';
 import rankingRoutes from './routes/ranking.js';
+import reportRoutes from './routes/reports.js';
 
 // Import middleware
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
@@ -74,6 +75,7 @@ app.use('/api/biblio', biblioRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/groups', groupRoutes);
 app.use('/api/ranking', rankingRoutes);
+app.use('/api/reports', reportRoutes);
 
 // Error handling
 app.use(notFoundHandler);
