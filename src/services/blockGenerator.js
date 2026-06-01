@@ -63,9 +63,8 @@ export function generateCustomerProformaBlock(ticket, items) {
 
   // Separate available/verification items from unavailable
   const availableItems = sortedItems.filter(i => i.status === 'positive');
-  const verificationItems = sortedItems.filter(i => i.status === 'no_registra_verificar');
+  const verificationItems = sortedItems.filter(i => i.status === 'no_registra_verificar' || i.status === 'pending_info');
   const unavailableItems = sortedItems.filter(i => i.status === 'negative' || i.status === 'no_registra');
-  const pendingItems = sortedItems.filter(i => i.status === 'pending_info');
 
   // Build item lines
   const itemLines = [];
@@ -148,12 +147,6 @@ export function generateCustomerProformaBlock(ticket, items) {
     }
   }
 
-  // Pending items
-  for (const item of pendingItems) {
-    const desc = normalizeProductName(item.parsed_description || item.raw_line);
-    const qty = item.quantity > 1 ? ` x${item.quantity}` : '';
-    itemLines.push(`⏳ ${desc}${qty}`);
-  }
 
   // Total only from positive items with price
   const positiveWithPrice = items.filter(i => i.status === 'positive' && i.selling_price);
