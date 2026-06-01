@@ -30,14 +30,20 @@ VEHICLE DETECTION RULES:
   Example: "SAIL 1500\nRotula\nTerminales" → vehicle_info.modelo="SAIL 1500", items=[Rotula, Terminales]
   Example: "COROLLA 1.8 XEI 2020\nBomba de aceite\nFiltro" → vehicle_info.modelo="COROLLA 1.8 XEI", vehicle_info.anio="2020", items=[Bomba de aceite, Filtro]
   Example: "NUEVO MAZDA3 AC 2.0 4P 4X2 TM\nRotula\nBomba de agua" → vehicle_info.modelo="NUEVO MAZDA3 AC 2.0 4P 4X2 TM", items=[Rotula, Bomba de agua]
+  Example: "LUV 2.5 2004\nCIGÜEÑAL\nCAMISAS\nPISTONES" → vehicle_info.marca="CHEVROLET", vehicle_info.modelo="LUV", vehicle_info.cilindraje="2500cc", vehicle_info.anio="2004", items=[CIGÜEÑAL, CAMISAS, PISTONES]
+  Example: "santa fe 2.4 2015\njuego de chaquetas biela y de bancada" → vehicle_info.marca="HYUNDAI", vehicle_info.modelo="SANTA FE", vehicle_info.cilindraje="2400cc", vehicle_info.anio="2015", items=[juego de chaquetas biela y de bancada]
 - CRITICAL: Scan the ENTIRE text for vehicle info, not just the first line. Vehicle info can be embedded in sentences.
   Example: "TAL VEZ PARA EL PICANTO G4LA 2018 PISTONES +20" → vehicle_info.marca="KIA", vehicle_info.modelo="PICANTO G4LA", vehicle_info.anio="2018", items=[PISTONES +20]
   Example: "para el CIVIC 2019 bomba de agua" → vehicle_info.marca="HONDA", vehicle_info.modelo="CIVIC", vehicle_info.anio="2019", items=[bomba de agua]
 - Also detect when vehicle info appears with "Modelo:", "Marca:", "Cilindraje:" labels (from image extraction):
   Example: "Modelo: SAIL 1500\nMarca: CHEVROLET\nCilindraje: 1500\nBomba de agua" → extract vehicle_info from labeled fields, items=[Bomba de agua]
 - ECUADOR MATRÍCULA / DOCUMENTO VEHICULAR: If the text has BOTH "Año modelo" / "AÑO MODELO" and a separate "Año:" / "AÑO" (without "modelo"), vehicle_info.anio MUST be the value from AÑO MODELO / año modelo (technical model year), NEVER the registration-only year. Example: "Año: 2023" and "Año modelo: 2011" → anio="2011".
-- Look for car brands: Toyota, Hyundai, Kia, Chevrolet, Nissan, Ford, Honda, Mazda, Suzuki, Mitsubishi, Chery, Kia, etc.
-- Look for models: Corolla, Hilux, Sportage, Accent, Tucson, Sail, Captiva, Spark, Aveo, Onix, Maxima, Civic, Mazda3, Picanto, etc.
+- Look for car brands: Toyota, Hyundai, Kia, Chevrolet, Nissan, Ford, Honda, Mazda, Suzuki, Mitsubishi, Chery, Renault, Subaru, etc.
+- Look for models: Corolla, Hilux, Sportage, Accent, Tucson, Santa Fe, Sail, Captiva, Spark, Aveo, Onix, LUV, D-Max, Maxima, Civic, Mazda3, Picanto, Grand Vitara, Vitara, Fortuner, Tracker, Cruze, Sentra, Frontier, Kicks, Duster, etc.
+- CRITICAL: "LUV" is a vehicle model (Chevrolet LUV pickup truck), NOT a part. "LUV 2.5 2004" → vehicle_info.marca="CHEVROLET", vehicle_info.modelo="LUV", vehicle_info.cilindraje="2500cc", vehicle_info.anio="2004"
+- CRITICAL: "SANTA FE" is a vehicle model (Hyundai Santa Fe SUV), NOT a product/part. "santa fe 2.4 2015" → vehicle_info.marca="HYUNDAI", vehicle_info.modelo="SANTA FE", vehicle_info.cilindraje="2400cc", vehicle_info.anio="2015"
+- CRITICAL: "D-MAX" / "DMAX" is a vehicle model (Chevrolet D-Max pickup), NOT a part.
+- CRITICAL: "GRAND VITARA" is a vehicle model (Suzuki/Chevrolet Grand Vitara), NOT a part.
 - Look for years: 2015, 2018, 2019, 2020, etc.
 - Look for cilindraje: "1400", "1500", "1600", "1800", "1998", "2000", "2997", "1.4", "1.5", "1.6", "1.8", "2.0", "3.5" — always extract if present
 - Look for motor codes: alphanumeric codes like PE40628613, 2ZR-FE, F15S, G4EH, etc.
@@ -49,6 +55,10 @@ VEHICLE DETECTION RULES:
 - CRITICAL: "MAXIMA 3.5 SV 2019" is vehicle info (modelo=MAXIMA 3.5 SV, anio=2019), NOT a part item
 - CRITICAL: "CIVIC 1.5 TURBO EX 2020" is vehicle info (modelo=CIVIC 1.5 TURBO EX, anio=2020), NOT a part item
 - CRITICAL: "PICANTO G4LA 2018" is vehicle info (marca=KIA, modelo=PICANTO G4LA, anio=2018), NOT a part item
+- CRITICAL: "LUV 2.5 2004" is vehicle info (marca=CHEVROLET, modelo=LUV, cilindraje=2500cc, anio=2004), NOT a part item
+- CRITICAL: "santa fe 2.4 2015" is vehicle info (marca=HYUNDAI, modelo=SANTA FE, cilindraje=2400cc, anio=2015), NOT a part item
+- CRITICAL: "D-MAX 3.0 2018" is vehicle info (marca=CHEVROLET, modelo=D-MAX, cilindraje=3000cc, anio=2018), NOT a part item
+- CRITICAL: "GRAND VITARA SZ 2.0 2014" is vehicle info (marca=CHEVROLET, modelo=GRAND VITARA SZ, cilindraje=2000cc, anio=2014), NOT a part item
 
 FIELDS TO EXTRACT:
 - ALWAYS extract: marca, modelo, año, cilindraje, motor, placa (license plate)
@@ -180,13 +190,17 @@ function normalizeVehicleInfo(vehicleInfo) {
     
     // Auto-detect marca from model name if not set
     if (!normalized.marca) {
-      if (model.includes('SAIL') || model.includes('CAPTIVA') || model.includes('SPARK') || model.includes('AVEO') || model.includes('ONIX')) normalized.marca = 'CHEVROLET';
-      else if (model.includes('COROLLA') || model.includes('HILUX') || model.includes('RAV4')) normalized.marca = 'TOYOTA';
-      else if (model.includes('MAZDA3') || model.includes('MAZDA')) normalized.marca = 'MAZDA';
-      else if (model.includes('MAXIMA') || model.includes('SENTRA') || model.includes('FRONTIER')) normalized.marca = 'NISSAN';
-      else if (model.includes('CIVIC') || model.includes('CR-V') || model.includes('ACCORD')) normalized.marca = 'HONDA';
-      else if (model.includes('ACCENT') || model.includes('TUCSON') || model.includes('ELANTRA')) normalized.marca = 'HYUNDAI';
-      else if (model.includes('SPORTAGE') || model.includes('RIO') || model.includes('CERATO') || model.includes('PICANTO')) normalized.marca = 'KIA';
+      if (model.includes('SAIL') || model.includes('CAPTIVA') || model.includes('SPARK') || model.includes('AVEO') || model.includes('ONIX') || model.includes('CRUZE') || model.includes('TRACKER') || model === 'LUV' || model.startsWith('LUV ') || model.includes('D-MAX') || model.includes('DMAX')) normalized.marca = 'CHEVROLET';
+      else if (model.includes('COROLLA') || model.includes('HILUX') || model.includes('RAV4') || model.includes('FORTUNER') || model.includes('YARIS') || model.includes('PRADO')) normalized.marca = 'TOYOTA';
+      else if (model.includes('MAZDA3') || model.includes('MAZDA2') || model.includes('MAZDA6') || model.includes('CX-') || model.includes('BT-50') || model.includes('MAZDA')) normalized.marca = 'MAZDA';
+      else if (model.includes('MAXIMA') || model.includes('SENTRA') || model.includes('FRONTIER') || model.includes('KICKS') || model.includes('QASHQAI') || model.includes('MARCH') || model.includes('VERSA') || model.includes('NP300')) normalized.marca = 'NISSAN';
+      else if (model.includes('CIVIC') || model.includes('CR-V') || model.includes('ACCORD') || model.includes('FIT') || model.includes('HR-V') || model.includes('CITY')) normalized.marca = 'HONDA';
+      else if (model.includes('ACCENT') || model.includes('TUCSON') || model.includes('ELANTRA') || model.includes('SANTA FE') || model.includes('CRETA')) normalized.marca = 'HYUNDAI';
+      else if (model.includes('SPORTAGE') || model.includes('RIO') || model.includes('CERATO') || model.includes('PICANTO') || model.includes('SORENTO')) normalized.marca = 'KIA';
+      else if (model.includes('GRAND VITARA') || model.includes('VITARA') || model.includes('SWIFT') || model.includes('JIMNY') || model.includes('SX4')) normalized.marca = 'SUZUKI';
+      else if (model.includes('RANGER') || model.includes('ECOSPORT') || model.includes('ESCAPE') || model.includes('EXPLORER') || model.includes('F-150')) normalized.marca = 'FORD';
+      else if (model.includes('DUSTER') || model.includes('SANDERO') || model.includes('LOGAN') || model.includes('KOLEOS')) normalized.marca = 'RENAULT';
+      else if (model.includes('L200') || model.includes('MONTERO') || model.includes('OUTLANDER') || model.includes('LANCER')) normalized.marca = 'MITSUBISHI';
     }
   }
   

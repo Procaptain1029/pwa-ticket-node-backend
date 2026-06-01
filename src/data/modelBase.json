@@ -12,10 +12,76 @@
     "cilindraje": "1500cc"
   },
   {
+    "marca": "CHEVROLET",
+    "modelo": "LUV",
+    "aliases": ["CHEVROLET LUV", "LUV DMAX", "LUV D-MAX"],
+    "cilindraje": null
+  },
+  {
+    "marca": "CHEVROLET",
+    "modelo": "D-MAX",
+    "aliases": ["DMAX", "CHEVROLET D-MAX", "CHEVROLET DMAX", "D MAX"],
+    "cilindraje": null
+  },
+  {
+    "marca": "CHEVROLET",
+    "modelo": "GRAND VITARA",
+    "aliases": ["CHEVROLET GRAND VITARA", "GRAND VITARA SZ", "GRAND VITARA NEXT"],
+    "cilindraje": null
+  },
+  {
+    "marca": "CHEVROLET",
+    "modelo": "TRACKER",
+    "aliases": ["CHEVROLET TRACKER"],
+    "cilindraje": null
+  },
+  {
+    "marca": "CHEVROLET",
+    "modelo": "CRUZE",
+    "aliases": ["CHEVROLET CRUZE"],
+    "cilindraje": null
+  },
+  {
     "marca": "TOYOTA",
     "modelo": "COROLLA 1.8 XEI",
     "aliases": ["COROLLA XEI 1.8", "TOYOTA COROLLA XEI"],
     "cilindraje": "1800cc"
+  },
+  {
+    "marca": "TOYOTA",
+    "modelo": "HILUX",
+    "aliases": ["TOYOTA HILUX"],
+    "cilindraje": null
+  },
+  {
+    "marca": "TOYOTA",
+    "modelo": "FORTUNER",
+    "aliases": ["TOYOTA FORTUNER"],
+    "cilindraje": null
+  },
+  {
+    "marca": "HYUNDAI",
+    "modelo": "SANTA FE",
+    "aliases": ["HYUNDAI SANTA FE", "SANTAFE", "SANTA-FE"],
+    "cilindraje": null
+  },
+  {
+    "marca": "HYUNDAI",
+    "modelo": "TUCSON",
+    "aliases": ["HYUNDAI TUCSON"],
+    "cilindraje": null
+  },
+  {
+    "marca": "HYUNDAI",
+    "modelo": "ACCENT 1.6",
+    "aliases": ["HYUNDAI ACCENT 1.6", "ACCENT 1600"],
+    "cilindraje": "1600cc"
+  },
+  {
+    "marca": "HYUNDAI",
+    "modelo": "ELANTRA",
+    "aliases": ["HYUNDAI ELANTRA"],
+    "cilindraje": null
   },
   {
     "marca": "NISSAN",
@@ -24,10 +90,22 @@
     "cilindraje": "3500cc"
   },
   {
+    "marca": "NISSAN",
+    "modelo": "FRONTIER",
+    "aliases": ["NISSAN FRONTIER", "NP300 FRONTIER"],
+    "cilindraje": null
+  },
+  {
     "marca": "MAZDA",
     "modelo": "NUEVO MAZDA3 AC 2.0 4P 4X2 TM",
     "aliases": ["MAZDA3 AC 2.0 4P 4X2 TM", "NUEVO MAZDA 3 2.0"],
     "cilindraje": "2000cc"
+  },
+  {
+    "marca": "MAZDA",
+    "modelo": "BT-50",
+    "aliases": ["MAZDA BT-50", "BT50", "MAZDA BT50"],
+    "cilindraje": null
   },
   {
     "marca": "HONDA",
@@ -42,9 +120,39 @@
     "cilindraje": "2000cc"
   },
   {
-    "marca": "HYUNDAI",
-    "modelo": "ACCENT 1.6",
-    "aliases": ["HYUNDAI ACCENT 1.6", "ACCENT 1600"],
-    "cilindraje": "1600cc"
+    "marca": "KIA",
+    "modelo": "PICANTO",
+    "aliases": ["KIA PICANTO"],
+    "cilindraje": null
+  },
+  {
+    "marca": "SUZUKI",
+    "modelo": "VITARA",
+    "aliases": ["SUZUKI VITARA"],
+    "cilindraje": null
+  },
+  {
+    "marca": "SUZUKI",
+    "modelo": "SWIFT",
+    "aliases": ["SUZUKI SWIFT"],
+    "cilindraje": null
+  },
+  {
+    "marca": "FORD",
+    "modelo": "RANGER",
+    "aliases": ["FORD RANGER"],
+    "cilindraje": null
+  },
+  {
+    "marca": "RENAULT",
+    "modelo": "DUSTER",
+    "aliases": ["RENAULT DUSTER"],
+    "cilindraje": null
+  },
+  {
+    "marca": "MITSUBISHI",
+    "modelo": "L200",
+    "aliases": ["MITSUBISHI L200"],
+    "cilindraje": null
   }
 ]
