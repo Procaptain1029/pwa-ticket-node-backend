@@ -18,7 +18,9 @@ import {
   generateDespachosBlock,
   generateInternoBlock,
   generatePerSupplierBlocks,
-  generateAuditoriaBlock
+  generateAuditoriaBlock,
+  generatePedidoFinalBlock,
+  generatePedidoSupplierBlocks
 } from '../services/blockGenerator.js';
 import { startSlaTimer, completeSla, getSlaStatus, resetSlaTimer, getPendingAlerts, calculateSlaDeadline } from '../services/slaService.js';
 import { splitBySender } from '../services/whatsappSplitter.js';
@@ -3189,11 +3191,22 @@ router.get('/:id/blocks/:blockType', asyncHandler(async (req, res) => {
       block = targetItem ? generateAuditoriaBlock(targetItem) : 'No item found';
       break;
     }
+    case 'pedido_final': {
+      block = generatePedidoFinalBlock(ticket, items);
+      break;
+    }
+    case 'pedido_supplier': {
+      const supplierBlocks = generatePedidoSupplierBlocks(ticket, items);
+      return res.json({
+        block_type: 'pedido_supplier',
+        supplier_blocks: supplierBlocks
+      });
+    }
     default:
       return res.status(400).json({ 
         error: 'Invalid block type',
         code: 'INVALID_BLOCK_TYPE',
-        available: ['control', 'proforma_cliente', 'aux_seguimiento', 'reenvios', 'proveedor', 'despachos', 'interno', 'per_supplier', 'auditoria']
+        available: ['control', 'proforma_cliente', 'aux_seguimiento', 'reenvios', 'proveedor', 'despachos', 'interno', 'per_supplier', 'auditoria', 'pedido_final', 'pedido_supplier']
       });
   }
   

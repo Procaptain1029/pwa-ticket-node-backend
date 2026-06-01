@@ -417,6 +417,123 @@ Códigos:
 ═══════════════════════`;
 }
 
+/**
+ * Generate Pedido Final block (client-facing confirmed order)
+ * Shows only confirmed items (not excluded) with total
+ */
+export function generatePedidoFinalBlock(ticket, items) {
+  const vi = ticket.vehicle_info || {};
+  const vehicleParts = [vi.marca, vi.modelo, shouldAppendCilindraje(vi.modelo, vi.cilindraje) ? vi.cilindraje : null, vi.anio ? `(${vi.anio})` : null]
+    .filter(Boolean).join(' ');
+
+  const now = new Date();
+  const dateStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`;
+
+  // Only confirmed items (not excluded)
+  const confirmedItems = items.filter(i => !i.pedido_excluded && i.status === 'positive');
+  const excludedCount = items.filter(i => i.pedido_excluded).length;
+
+  if (confirmedItems.length === 0) {
+    return '✅ PEDIDO FINAL – DISTRIMIA S.A.\nNo hay líneas confirmadas en este pedido.';
+  }
+
+  const itemLines = confirmedItems.map((item, idx) => {
+    const desc = normalizeProductName(item.parsed_description || item.raw_line);
+    const qty = item.quantity > 1 ? ` x${item.quantity}` : '';
+    const brandPart = item.brand ? ` (${item.brand.toUpperCase()})` : '';
+    const price = item.selling_price ? `USD ${formatUSDAmount(item.selling_price)}` : '---';
+    const supplierPart = item.supplier_code ? ` | ${item.supplier_code}` : '';
+    const codePart = item.codigo_distrimia || item.codigo_oem || '';
+    const codeStr = codePart ? ` | Cód: ${codePart}` : '';
+    const note = item.seller_note ? ` | ${item.seller_note}` : '';
+    return `${idx + 1}. ${desc}${qty} — ${price}${brandPart}${supplierPart}${codeStr}${note}`;
+  });
+
+  const total = confirmedItems.reduce((sum, i) =>
+    sum + (parseFloat(i.selling_price || 0) * (i.quantity || 1)), 0
+  );
+
+  const sections = [];
+  sections.push('✅ PEDIDO FINAL – DISTRIMIA S.A.');
+  sections.push(`N° ${ticket.k_number} | 📅 ${dateStr}`);
+  if (vehicleParts) sections.push(`🚗 ${vehicleParts}`);
+  sections.push('');
+  sections.push(itemLines.join('\n'));
+  sections.push('');
+  sections.push(`💰 TOTAL PEDIDO: USD ${formatUSDAmount(total)}`);
+  sections.push(`📦 ${confirmedItems.length} línea(s) confirmada(s)${excludedCount > 0 ? ` | ${excludedCount} no incluida(s)` : ''}`);
+  sections.push('');
+
+  if (ticket.assigned_to_user) {
+    const advisorName = formatAdvisorName(ticket.assigned_to_user.full_name);
+    sections.push(`👤 ${advisorName}`);
+    sections.push('Asesor comercial');
+  }
+
+  sections.push('');
+  sections.push('🤝 Quedamos atentos');
+
+  return sections.join('\n');
+}
+
+/**
+ * Generate per-supplier Pedido blocks for logistics (retiro, despacho, compras)
+ * Groups confirmed items by supplier_code
+ */
+export function generatePedidoSupplierBlocks(ticket, items) {
+  const vi = ticket.vehicle_info || {};
+  const vehicleParts = [vi.marca, vi.modelo, shouldAppendCilindraje(vi.modelo, vi.cilindraje) ? vi.cilindraje : null, vi.anio ? `(${vi.anio})` : null]
+    .filter(Boolean).join(' ');
+
+  // Only confirmed positive items
+  const confirmedItems = items.filter(i => !i.pedido_excluded && i.status === 'positive');
+
+  // Group by supplier
+  const supplierGroups = {};
+  confirmedItems.forEach(item => {
+    const supplier = item.supplier_code || 'Sin proveedor';
+    if (!supplierGroups[supplier]) supplierGroups[supplier] = [];
+    supplierGroups[supplier].push(item);
+  });
+
+  const suppliers = Object.keys(supplierGroups);
+  if (suppliers.length === 0) return [];
+
+  return suppliers.map(supplier => {
+    const sItems = supplierGroups[supplier];
+    const itemLines = sItems.map((item, idx) => {
+      const desc = normalizeProductName(item.parsed_description || item.raw_line);
+      const qty = item.quantity > 1 ? ` x${item.quantity}` : '';
+      const code = item.codigo_distrimia || item.codigo_oem || '---';
+      const brandPart = item.brand ? ` (${item.brand.toUpperCase()})` : '';
+      const note = item.seller_note ? ` | ${item.seller_note}` : '';
+      return `${idx + 1}. ${desc}${qty}${brandPart} | Cód: ${code}${note}`;
+    });
+
+    const groupTotal = sItems.reduce((sum, i) =>
+      sum + (parseFloat(i.selling_price || 0) * (i.quantity || 1)), 0
+    );
+
+    const content = [
+      `📦 PEDIDO — ${supplier.toUpperCase()}`,
+      `#${ticket.k_number} | IT: ${sItems.length}`,
+      vehicleParts ? `🚗 ${vehicleParts}` : null,
+      '',
+      itemLines.join('\n'),
+      '',
+      `💰 Subtotal: USD ${formatUSDAmount(groupTotal)}`,
+      `📦 ${sItems.length} artículo(s)`,
+    ].filter(s => s !== null).join('\n');
+
+    return {
+      supplier,
+      item_count: sItems.length,
+      total: groupTotal,
+      content
+    };
+  });
+}
+
 // Helper functions
 function formatPrice(amount) {
   if (!amount) return '$0.00';
@@ -549,5 +666,7 @@ export default {
   generateDespachosBlock,
   generateInternoBlock,
   generatePerSupplierBlocks,
-  generateAuditoriaBlock
+  generateAuditoriaBlock,
+  generatePedidoFinalBlock,
+  generatePedidoSupplierBlocks
 };
