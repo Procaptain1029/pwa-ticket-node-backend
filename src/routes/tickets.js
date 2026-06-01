@@ -1752,7 +1752,7 @@ router.get('/alerts/pending',
  * Body: { ticket_ids: string[] }
  */
 router.delete('/bulk',
-  authorize(['admin', 'operator']),
+  authorize(['admin', 'operator', 'seller']),
   asyncHandler(async (req, res) => {
     const { ticket_ids } = req.body;
 
