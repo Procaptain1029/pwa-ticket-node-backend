@@ -1879,9 +1879,37 @@ router.get('/', asyncHandler(async (req, res) => {
     ...ticket,
     sla_status: getSlaStatus(ticket)
   }));
+
+  // Compute quote_total for ready/pedido tickets (sum of positive items' selling_price)
+  const readyTicketIds = ticketsWithSla
+    .filter(t => t.status === 'ready' || t.status === 'pedido')
+    .map(t => t.id);
+
+  let quoteTotals = {};
+  if (readyTicketIds.length > 0) {
+    const { data: itemsData } = await supabaseAdmin
+      .from('ticket_items')
+      .select('ticket_id, selling_price, quantity, status')
+      .in('ticket_id', readyTicketIds)
+      .eq('status', 'positive')
+      .not('selling_price', 'is', null);
+
+    if (itemsData) {
+      for (const item of itemsData) {
+        const tid = item.ticket_id;
+        if (!quoteTotals[tid]) quoteTotals[tid] = 0;
+        quoteTotals[tid] += parseFloat(item.selling_price) * (item.quantity || 1);
+      }
+    }
+  }
+
+  const ticketsWithTotal = ticketsWithSla.map(ticket => ({
+    ...ticket,
+    quote_total: quoteTotals[ticket.id] || null
+  }));
   
   res.json({
-    tickets: ticketsWithSla,
+    tickets: ticketsWithTotal,
     pagination: {
       page: parseInt(page),
       limit: parseInt(limit),
