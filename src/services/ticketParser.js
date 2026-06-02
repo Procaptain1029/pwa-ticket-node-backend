@@ -37,6 +37,11 @@ VEHICLE DETECTION RULES:
   Example: "para el CIVIC 2019 bomba de agua" → vehicle_info.marca="HONDA", vehicle_info.modelo="CIVIC", vehicle_info.anio="2019", items=[bomba de agua]
 - Also detect when vehicle info appears with "Modelo:", "Marca:", "Cilindraje:" labels (from image extraction):
   Example: "Modelo: SAIL 1500\nMarca: CHEVROLET\nCilindraje: 1500\nBomba de agua" → extract vehicle_info from labeled fields, items=[Bomba de agua]
+- CRITICAL: Ecuador "Revisión Técnica Vehicular" and matrícula documents use NUMBERED FIELDS like:
+  "01 Placa Actual GPZ0404", "02 Marca MAZDA", "03 Modelo MAZDA3 SEDAN 1.6 MT FL", "04 Año Fabricación 2008", "06 Cilindraje 1600", "12 Motor N° Z6567167", "16 Chasis PFCBK26880103575"
+  → When you see numbered field labels (01, 02, 03, etc.) followed by field names (Marca, Modelo, Año, Cilindraje, Motor, Chasis, Placa), these are ALL vehicle information, NOT product items. Extract them into vehicle_info.
+  Example: "02 Marca MAZDA\n03 Modelo MAZDA3 SEDAN 1.6 MT FL\n04 Año Fabricación 2008\n06 Cilindraje 1600" → vehicle_info.marca="MAZDA", vehicle_info.modelo="MAZDA3 SEDAN 1.6 MT FL", vehicle_info.anio="2008", vehicle_info.cilindraje="1600cc"
+- CRITICAL: "Año Fabricación" in Ecuador documents = the vehicle year. Use this for vehicle_info.anio.
 - ECUADOR MATRÍCULA / DOCUMENTO VEHICULAR: If the text has BOTH "Año modelo" / "AÑO MODELO" and a separate "Año:" / "AÑO" (without "modelo"), vehicle_info.anio MUST be the value from AÑO MODELO / año modelo (technical model year), NEVER the registration-only year. Example: "Año: 2023" and "Año modelo: 2011" → anio="2011".
 - Look for car brands: Toyota, Hyundai, Kia, Chevrolet, Nissan, Ford, Honda, Mazda, Suzuki, Mitsubishi, Chery, Renault, Subaru, etc.
 - Look for models: Corolla, Hilux, Sportage, Accent, Tucson, Santa Fe, Sail, Captiva, Spark, Aveo, Onix, LUV, D-Max, Maxima, Civic, Mazda3, Picanto, Grand Vitara, Vitara, Fortuner, Tracker, Cruze, Sentra, Frontier, Kicks, Duster, etc.

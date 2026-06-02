@@ -323,13 +323,17 @@ Reglas generales:
           }
           
           if (!normalized.marca) {
-            if (model.includes('SAIL') || model.includes('CAPTIVA') || model.includes('SPARK') || model.includes('AVEO') || model.includes('ONIX')) normalized.marca = 'CHEVROLET';
-            else if (model.includes('COROLLA') || model.includes('HILUX') || model.includes('RAV4')) normalized.marca = 'TOYOTA';
-            else if (model.includes('MAZDA3') || model.includes('MAZDA')) normalized.marca = 'MAZDA';
-            else if (model.includes('MAXIMA') || model.includes('SENTRA') || model.includes('FRONTIER')) normalized.marca = 'NISSAN';
-            else if (model.includes('CIVIC') || model.includes('CR-V') || model.includes('ACCORD')) normalized.marca = 'HONDA';
-            else if (model.includes('ACCENT') || model.includes('TUCSON') || model.includes('ELANTRA')) normalized.marca = 'HYUNDAI';
-            else if (model.includes('SPORTAGE') || model.includes('RIO') || model.includes('CERATO')) normalized.marca = 'KIA';
+            if (model.includes('SAIL') || model.includes('CAPTIVA') || model.includes('SPARK') || model.includes('AVEO') || model.includes('ONIX') || model.includes('CRUZE') || model.includes('TRACKER') || model === 'LUV' || model.startsWith('LUV ') || model.includes('D-MAX') || model.includes('DMAX')) normalized.marca = 'CHEVROLET';
+            else if (model.includes('COROLLA') || model.includes('HILUX') || model.includes('RAV4') || model.includes('FORTUNER') || model.includes('YARIS') || model.includes('PRADO')) normalized.marca = 'TOYOTA';
+            else if (model.includes('MAZDA3') || model.includes('MAZDA2') || model.includes('MAZDA6') || model.includes('CX-') || model.includes('BT-50') || model.includes('MAZDA')) normalized.marca = 'MAZDA';
+            else if (model.includes('MAXIMA') || model.includes('SENTRA') || model.includes('FRONTIER') || model.includes('KICKS') || model.includes('QASHQAI') || model.includes('MARCH') || model.includes('VERSA') || model.includes('NP300')) normalized.marca = 'NISSAN';
+            else if (model.includes('CIVIC') || model.includes('CR-V') || model.includes('ACCORD') || model.includes('FIT') || model.includes('HR-V') || model.includes('CITY')) normalized.marca = 'HONDA';
+            else if (model.includes('ACCENT') || model.includes('TUCSON') || model.includes('ELANTRA') || model.includes('SANTA FE') || model.includes('CRETA')) normalized.marca = 'HYUNDAI';
+            else if (model.includes('SPORTAGE') || model.includes('RIO') || model.includes('CERATO') || model.includes('PICANTO') || model.includes('SORENTO')) normalized.marca = 'KIA';
+            else if (model.includes('GRAND VITARA') || model.includes('VITARA') || model.includes('SWIFT') || model.includes('JIMNY') || model.includes('SX4')) normalized.marca = 'SUZUKI';
+            else if (model.includes('RANGER') || model.includes('ECOSPORT') || model.includes('ESCAPE') || model.includes('EXPLORER') || model.includes('F-150')) normalized.marca = 'FORD';
+            else if (model.includes('DUSTER') || model.includes('SANDERO') || model.includes('LOGAN') || model.includes('KOLEOS')) normalized.marca = 'RENAULT';
+            else if (model.includes('L200') || model.includes('MONTERO') || model.includes('OUTLANDER') || model.includes('LANCER')) normalized.marca = 'MITSUBISHI';
           }
         }
         
