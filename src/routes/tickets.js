@@ -25,6 +25,7 @@ import {
 import { startSlaTimer, completeSla, getSlaStatus, resetSlaTimer, getPendingAlerts, calculateSlaDeadline } from '../services/slaService.js';
 import { splitBySender } from '../services/whatsappSplitter.js';
 import { acquireLock, releaseLock, extendLock, getLockStatus } from '../services/lockService.js';
+import { computeGroupStats, saveGroupSnapshot, classifyCategory } from '../services/groupAnalytics.js';
 
 const router = Router();
 
@@ -2196,6 +2197,27 @@ router.put('/:id',
       new_values: validated,
       performed_by: userId
     }).then(null, e => console.error('Audit log failed:', e));
+
+    // Fire-and-forget: update group analytics snapshot when ticket is closed
+    if (validated.status === 'closed' && ticket.group_code) {
+      (async () => {
+        try {
+          const now = new Date();
+          const periodStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+          const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+          const periodEnd = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+          const stats = await computeGroupStats(ticket.group_code, periodStart, periodEnd);
+          await saveGroupSnapshot(stats, periodStart, periodEnd);
+          const category = classifyCategory(stats);
+          if (category) {
+            await supabaseAdmin.from('groups').update({ category, category_updated_at: now.toISOString() }).eq('code', ticket.group_code);
+          }
+          console.log(`[GROUP-ANALYTICS] Updated snapshot for ${ticket.group_code}: conversion=${stats.conversion_rate} cat=${category}`);
+        } catch (e) {
+          console.error(`[GROUP-ANALYTICS] Failed for ${ticket.group_code}:`, e.message);
+        }
+      })();
+    }
   })
 );
 
