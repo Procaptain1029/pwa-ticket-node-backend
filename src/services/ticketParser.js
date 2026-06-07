@@ -121,6 +121,210 @@ OUTPUT FORMAT (JSON):
   "parse_notes": "any notes about parsing decisions"
 }`;
 
+const VEHICLE_LABEL_MAP = {
+  modelo: 'modelo',
+  marca: 'marca',
+  motor: 'motor',
+  cilindraje: 'cilindraje',
+  chasis: 'chasis',
+  serie: 'serie',
+  placa: 'placa',
+  'año modelo': 'anio',
+  'ano modelo': 'anio',
+  año: 'anio',
+  ano: 'anio',
+};
+
+const SKIP_LINE_PATTERNS = [
+  /^---\s*.+\s*---$/,
+  /^📄|^💰|^⚠️|^📦|^💬|^👤|^🚗\s/,
+  /^PROFORMA/i,
+  /^TOTAL/i,
+  /Precios sujetos/i,
+  /Disponibilidad sujeta/i,
+  /Precios incluyen IVA/i,
+  /Quedo atento/i,
+  /^Asesor comercial/i,
+  /^N°\s*K/i,
+  /^Sin información de vehículo/i,
+];
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isRetryableOpenAIError(error) {
+  const status = error?.status || error?.response?.status;
+  if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) return true;
+  const code = error?.code;
+  if (code === 'ECONNRESET' || code === 'ETIMEDOUT' || code === 'ENOTFOUND') return true;
+  const msg = String(error?.message || '').toLowerCase();
+  return msg.includes('timeout') || msg.includes('rate limit') || msg.includes('overloaded');
+}
+
+function parseAIJson(content) {
+  if (!content) throw new Error('EMPTY_AI_RESPONSE');
+  let cleaned = content.replace(/```json?\s*/gi, '').replace(/```/g, '').trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) return JSON.parse(match[0]);
+    throw new Error('JSON_PARSE_FAILED');
+  }
+}
+
+function estimateMaxTokens(text) {
+  const lineCount = text.split('\n').filter(l => l.trim()).length;
+  return Math.min(16000, Math.max(2500, 700 + lineCount * 120));
+}
+
+/**
+ * Clean pasted text before sending to OpenAI — removes proforma/footer noise,
+ * extracts labeled vehicle block, keeps part request lines.
+ */
+export function preprocessRawText(rawText) {
+  const vehicleInfo = {};
+  const partLines = [];
+  let inVehicleSection = false;
+
+  for (const line of rawText.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    if (/^---\s*(.+?)\s*---$/i.test(trimmed)) {
+      inVehicleSection = /veh[ií]culo/i.test(trimmed);
+      continue;
+    }
+
+    const labelMatch = trimmed.match(/^([A-Za-zÁÉÍÓÚáéíóúñÑ\s]+):\s*(.+)$/);
+    if (labelMatch) {
+      const key = labelMatch[1].trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const field = VEHICLE_LABEL_MAP[key];
+      if (field) {
+        vehicleInfo[field] = labelMatch[2].trim();
+        continue;
+      }
+    }
+
+    if (inVehicleSection && labelMatch) continue;
+
+    if (SKIP_LINE_PATTERNS.some(p => p.test(trimmed))) continue;
+    if (/\$\s*\d|USD\s*[\d,]+|TOTAL\s*:/i.test(trimmed)) continue;
+
+    const proformaItem = trimmed.match(/^[✅❌⏳🚫🟢🔴🟡]\s*(.+?)(?:\s*[—–-]\s*\$|\s*🧩|\s*\(|$)/);
+    if (proformaItem) {
+      const name = proformaItem[1].replace(/\s+x\d+\s*$/i, '').trim();
+      if (name && name.length > 1) partLines.push(name);
+      continue;
+    }
+
+    if (/^[\d]{1,2}[\/.-][\d]{1,2}/.test(trimmed) && trimmed.includes(':') && trimmed.length < 80) {
+      continue;
+    }
+
+    partLines.push(trimmed);
+  }
+
+  const textForAI = partLines.join('\n').trim() || rawText.trim();
+  return { vehicleInfo, partLines, textForAI };
+}
+
+async function callOpenAIParser(textForAI, rawText, attempt = 1) {
+  const maxAttempts = 3;
+  try {
+    return await openai.chat.completions.create({
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: PARSER_SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: `Parse the following WhatsApp message for auto parts requests:\n\n${textForAI}`,
+        },
+      ],
+      response_format: { type: 'json_object' },
+      temperature: 0.1,
+      max_tokens: estimateMaxTokens(rawText),
+    });
+  } catch (error) {
+    if (attempt < maxAttempts && isRetryableOpenAIError(error)) {
+      console.warn(`[PARSER] OpenAI retry ${attempt}/${maxAttempts - 1}:`, error.message);
+      await sleep(1000 * attempt);
+      return callOpenAIParser(textForAI, rawText, attempt + 1);
+    }
+    throw error;
+  }
+}
+
+function mergeVehicleInfo(base, extracted) {
+  const merged = { ...(base || {}) };
+  for (const [key, val] of Object.entries(extracted || {})) {
+    if (val && !merged[key]) merged[key] = val;
+  }
+  return Object.keys(merged).length > 0 ? merged : null;
+}
+
+function buildTicketFromRuleBased(rawText, groupCode, preprocessed, reason) {
+  let vehicleForNorm = preprocessed.vehicleInfo ? { ...preprocessed.vehicleInfo } : {};
+  vehicleForNorm = mergeVehicleInfoWithModelBase(vehicleForNorm, [rawText]);
+  consolidateMatriculaAnio(vehicleForNorm, [rawText]);
+  const normalizedVehicle = normalizeVehicleInfo(vehicleForNorm);
+
+  let itemLines = preprocessed.partLines.filter(line => {
+    const t = line.trim();
+    if (t.length < 2) return false;
+    if (SKIP_LINE_PATTERNS.some(p => p.test(t))) return false;
+    return true;
+  });
+
+  if (itemLines.length === 0) {
+    itemLines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 1 && !SKIP_LINE_PATTERNS.some(p => p.test(l)));
+  }
+
+  const items = itemLines.map((line, index) => ({
+    raw_line: line,
+    description: line,
+    quantity: 1,
+    item_order: index + 1,
+    status: 'pending_info',
+  }));
+
+  const expandedItems = splitCompoundItems(items.map(i => ({ ...i, description: i.description })));
+  const itemCount = expandedItems.length;
+
+  const notes = {
+    API_ERROR: 'Parser alternativo: error de conexión con OpenAI',
+    EMPTY_AI_RESPONSE: 'Parser alternativo: respuesta vacía de OpenAI',
+    JSON_PARSE_FAILED: 'Parser alternativo: respuesta JSON inválida (texto muy largo o truncado)',
+    INVALID_AI_RESPONSE: 'Parser alternativo: estructura de respuesta incompleta',
+    ENHANCE_FAILED: 'Parser alternativo: error al procesar respuesta de IA',
+  };
+
+  return {
+    tickets: [{
+      raw_text: rawText,
+      group_code: groupCode,
+      items: expandedItems.map((item, itemIndex) => ({
+        ...item,
+        item_order: itemIndex + 1,
+        quantity: item.quantity || 1,
+        status: 'pending_info',
+      })),
+      item_count: itemCount,
+      length_class: itemCount <= 3 ? 'short' : itemCount <= 7 ? 'medium' : 'long',
+      priority: 'normal',
+      status: 'pending_review',
+      possible_grouping: itemCount > 10,
+      vehicle_info: normalizedVehicle,
+      vin: extractVIN(rawText),
+    }],
+    total_tickets: 1,
+    parse_notes: notes[reason] || 'Parser alternativo usado — revise items generados',
+    original_raw_text: rawText,
+    parse_method: 'fallback',
+  };
+}
+
 /**
  * Parse raw WhatsApp text into structured ticket data
  * @param {string} rawText - The raw pasted text
@@ -128,31 +332,33 @@ OUTPUT FORMAT (JSON):
  * @returns {Promise<Object>} Parsed ticket data
  */
 export async function parseTicketText(rawText, groupCode) {
-  try {
-    const response = await openai.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: [
-        { role: 'system', content: PARSER_SYSTEM_PROMPT },
-        { 
-          role: 'user', 
-          content: `Parse the following WhatsApp message for auto parts requests:\n\n${rawText}` 
-        }
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.1, // Low temperature for consistent parsing
-      max_tokens: 4000
-    });
+  const preprocessed = preprocessRawText(rawText);
 
-    const parsed = JSON.parse(response.choices[0].message.content);
-    
-    // Validate and enhance parsed data
-    return enhanceParsedTickets(parsed, groupCode, rawText);
-    
+  try {
+    const response = await callOpenAIParser(preprocessed.textForAI, rawText);
+    const content = response.choices[0]?.message?.content;
+    const parsed = parseAIJson(content);
+
+    if (!parsed?.tickets || !Array.isArray(parsed.tickets) || parsed.tickets.length === 0) {
+      throw new Error('INVALID_AI_RESPONSE');
+    }
+
+    const result = enhanceParsedTickets(parsed, groupCode, rawText, preprocessed.vehicleInfo);
+    return { ...result, parse_method: 'ai' };
   } catch (error) {
-    console.error('AI parsing error:', error);
-    
-    // Fallback: create single ticket with unparsed content
-    return createFallbackTicket(rawText, groupCode);
+    const reason = error.message?.includes('INVALID') ? 'INVALID_AI_RESPONSE'
+      : error.message?.includes('JSON') ? 'JSON_PARSE_FAILED'
+      : error.message?.includes('EMPTY') ? 'EMPTY_AI_RESPONSE'
+      : 'API_ERROR';
+
+    console.error(`[PARSER] AI failed (${reason}):`, error.message || error);
+
+    try {
+      return buildTicketFromRuleBased(rawText, groupCode, preprocessed, reason);
+    } catch (fallbackError) {
+      console.error('[PARSER] Rule-based fallback failed:', fallbackError);
+      return createFallbackTicket(rawText, groupCode, reason);
+    }
   }
 }
 
@@ -347,40 +553,33 @@ function splitCompoundItems(items) {
 /**
  * Enhance parsed tickets with additional computed fields
  */
-function enhanceParsedTickets(parsed, groupCode, originalRawText) {
-  const tickets = parsed.tickets.map((ticket, index) => {
-    // Split compound items (e.g. "Pistones y rines +30" → 2 items)
+function enhanceParsedTickets(parsed, groupCode, originalRawText, extractedVehicle = {}) {
+  const tickets = parsed.tickets.map((ticket) => {
     const expandedItems = splitCompoundItems(ticket.items || []);
-
-    // Recalculate item count after split
     const itemCount = expandedItems.length || 0;
-    
-    // Normalize vehicle info (fix Ecuador matrícula: año modelo vs año registro)
+
     let vehicleForNorm = ticket.vehicle_info ? { ...ticket.vehicle_info } : {};
+    vehicleForNorm = mergeVehicleInfo(vehicleForNorm, extractedVehicle);
     vehicleForNorm = mergeVehicleInfoWithModelBase(vehicleForNorm, [originalRawText, ticket.raw_text || '']);
     consolidateMatriculaAnio(vehicleForNorm, [originalRawText, ticket.raw_text || '']);
     const normalizedVehicle = normalizeVehicleInfo(vehicleForNorm);
-    
-    // Determine length class
+
     let lengthClass = 'short';
     if (itemCount >= 4 && itemCount <= 7) lengthClass = 'medium';
     else if (itemCount >= 8) lengthClass = 'long';
-    
-    // Validate priority
+
     const validPriorities = ['low', 'normal', 'high', 'urgent'];
-    const priority = validPriorities.includes(ticket.priority) 
-      ? ticket.priority 
-      : 'normal';
-    
-    // Mark low confidence tickets for review
-    const needsReview = ticket.confidence < 0.7 || !expandedItems.length;
-    
+    const priority = validPriorities.includes(ticket.priority) ? ticket.priority : 'normal';
+
+    const confidence = typeof ticket.confidence === 'number' ? ticket.confidence : 1;
+    const needsReview = confidence < 0.7 || !expandedItems.length;
+
     return {
       ...ticket,
       group_code: groupCode,
       item_count: itemCount,
       length_class: lengthClass,
-      priority: priority,
+      priority,
       status: needsReview ? 'pending_review' : 'in_progress',
       possible_grouping: ticket.possible_grouping || false,
       vehicle_info: normalizedVehicle,
@@ -388,8 +587,8 @@ function enhanceParsedTickets(parsed, groupCode, originalRawText) {
         ...item,
         item_order: itemIndex + 1,
         quantity: item.quantity || 1,
-        status: 'pending_info'
-      }))
+        status: 'pending_info',
+      })),
     };
   });
 
@@ -397,41 +596,16 @@ function enhanceParsedTickets(parsed, groupCode, originalRawText) {
     tickets,
     total_tickets: tickets.length,
     parse_notes: parsed.parse_notes,
-    original_raw_text: originalRawText
+    original_raw_text: originalRawText,
   };
 }
 
 /**
- * Create fallback ticket when AI parsing fails
+ * Last-resort fallback when rule-based parsing also fails
  */
-function createFallbackTicket(rawText, groupCode) {
-  // Simple line-based parsing
-  const lines = rawText.split('\n').filter(line => line.trim());
-  
-  const items = lines.map((line, index) => ({
-    raw_line: line.trim(),
-    description: line.trim(),
-    quantity: 1,
-    item_order: index + 1,
-    status: 'pending_info'
-  }));
-
-  return {
-    tickets: [{
-      raw_text: rawText,
-      group_code: groupCode,
-      items,
-      item_count: items.length,
-      length_class: items.length <= 3 ? 'short' : items.length <= 7 ? 'medium' : 'long',
-      priority: 'normal',
-      status: 'pending_review',
-      possible_grouping: true,
-      vin: extractVIN(rawText)
-    }],
-    total_tickets: 1,
-    parse_notes: 'Fallback parsing used - AI parsing failed',
-    original_raw_text: rawText
-  };
+function createFallbackTicket(rawText, groupCode, reason = 'API_ERROR') {
+  const preprocessed = preprocessRawText(rawText);
+  return buildTicketFromRuleBased(rawText, groupCode, preprocessed, reason);
 }
 
 /**
@@ -463,4 +637,4 @@ export function extractPlate(text) {
 }
 
 export { splitCompoundItems };
-export default { parseTicketText, extractVIN, extractPlate, splitCompoundItems };
+export default { parseTicketText, extractVIN, extractPlate, splitCompoundItems, preprocessRawText };

@@ -1,4 +1,4 @@
-import { Router } from 'express';
+﻿import { Router } from 'express';
 import { z } from 'zod';
 import multer from 'multer';
 import fs from 'fs';
@@ -26,6 +26,16 @@ import { startSlaTimer, completeSla, getSlaStatus, resetSlaTimer, getPendingAler
 import { splitBySender } from '../services/whatsappSplitter.js';
 import { acquireLock, releaseLock, extendLock, getLockStatus } from '../services/lockService.js';
 import { computeGroupStats, saveGroupSnapshot, classifyCategory } from '../services/groupAnalytics.js';
+import {
+  findDuplicates,
+  getCoincidenceCountsForTickets,
+  getCoincidencesDetail,
+  compareCoincidences,
+  searchReferences,
+  copySelectedItems,
+  normalizeForComparison,
+  tokenSetSimilarity,
+} from '../services/duplicateService.js';
 
 const router = Router();
 
@@ -62,11 +72,11 @@ const updateTicketSchema = z.object({
 });
 
 /**
- * Valid status transitions per client spec §2:
- *   Pendiente → En Proceso → Listo → Pedido → Cerrado
- *   En Revisión is a special state for duplicates
+ * Valid status transitions per client spec Â§2:
+ *   Pendiente â†’ En Proceso â†’ Listo â†’ Pedido â†’ Cerrado
+ *   En RevisiÃ³n is a special state for duplicates
  * 
- * Role-based transition rules per client spec §1:
+ * Role-based transition rules per client spec Â§1:
  *   Operador: cannot change status (generate only)
  *   Vendedor: can transition to in_progress (via Take), ready, pedido, closed (only own tickets)
  *   Vendedor: can take/manage en_revision duplicates (take, release, copy base)
@@ -88,27 +98,27 @@ const VALID_TRANSITIONS = {
 /** Roles allowed to make specific transitions */
 const TRANSITION_ROLES = {
   // Seller transitions
-  'in_progress→ready': ['seller', 'admin'],
-  'ready→pedido': ['seller', 'dispatcher', 'admin'],
-  'pedido→closed': ['seller', 'admin'], // only the assigned seller or admin
+  'in_progressâ†’ready': ['seller', 'admin'],
+  'readyâ†’pedido': ['seller', 'dispatcher', 'admin'],
+  'pedidoâ†’closed': ['seller', 'admin'], // only the assigned seller or admin
   // Dispatcher transitions
-  'pending→en_revision': ['dispatcher', 'admin'],
-  'pending_review→en_revision': ['dispatcher', 'admin'],
-  'en_revision→pending': ['seller', 'dispatcher', 'admin'],
-  'en_revision→in_progress': ['seller', 'dispatcher', 'admin'],
+  'pendingâ†’en_revision': ['dispatcher', 'admin'],
+  'pending_reviewâ†’en_revision': ['dispatcher', 'admin'],
+  'en_revisionâ†’pending': ['seller', 'dispatcher', 'admin'],
+  'en_revisionâ†’in_progress': ['seller', 'dispatcher', 'admin'],
   // General
-  'pending→in_progress': ['seller', 'dispatcher', 'admin'],
-  'pending_review→in_progress': ['seller', 'dispatcher', 'admin'],
-  'in_progress→en_revision': ['dispatcher', 'admin'],
-  'in_progress→cancelled': ['dispatcher', 'admin'],
-  'pending→cancelled': ['dispatcher', 'admin'],
-  'pending_review→cancelled': ['dispatcher', 'admin'],
-  'ready→cancelled': ['dispatcher', 'admin'],
-  'ready→in_progress': ['seller', 'dispatcher', 'admin'],
-  'en_revision→cancelled': ['dispatcher', 'admin'],
-  'cancelled→pending': ['admin'],
-  'reenviado→pending': ['dispatcher', 'admin'],
-  'reenviado→in_progress': ['dispatcher', 'admin'],
+  'pendingâ†’in_progress': ['seller', 'dispatcher', 'admin'],
+  'pending_reviewâ†’in_progress': ['seller', 'dispatcher', 'admin'],
+  'in_progressâ†’en_revision': ['dispatcher', 'admin'],
+  'in_progressâ†’cancelled': ['dispatcher', 'admin'],
+  'pendingâ†’cancelled': ['dispatcher', 'admin'],
+  'pending_reviewâ†’cancelled': ['dispatcher', 'admin'],
+  'readyâ†’cancelled': ['dispatcher', 'admin'],
+  'readyâ†’in_progress': ['seller', 'dispatcher', 'admin'],
+  'en_revisionâ†’cancelled': ['dispatcher', 'admin'],
+  'cancelledâ†’pending': ['admin'],
+  'reenviadoâ†’pending': ['dispatcher', 'admin'],
+  'reenviadoâ†’in_progress': ['dispatcher', 'admin'],
 };
 
 const updateItemSchema = z.object({
@@ -234,7 +244,7 @@ const expressUpload = multer({
  * Flow:
  *   1. Immediately save a "shell" ticket with raw text + attachments (< 1s)
  *   2. Return success so operator can go back to WhatsApp
- *   3. Fire background processing (AI parse, duplicate check, SLA) — non-blocking
+ *   3. Fire background processing (AI parse, duplicate check, SLA) â€” non-blocking
  * 
  * Body (multipart/form-data):
  *   - group_code (string, required): client/group code
@@ -252,7 +262,7 @@ router.post('/express',
         for (const f of req.files) { try { fs.unlinkSync(f.path); } catch {} }
       }
       return res.status(400).json({ 
-        error: 'Código de grupo requerido', 
+        error: 'CÃ³digo de grupo requerido', 
         code: 'MISSING_GROUP_CODE' 
       });
     }
@@ -261,7 +271,7 @@ router.post('/express',
     const sharedText = cleanWhatsAppHeaders((req.body.shared_text || '').trim());
     const files = req.files || [];
 
-    // Upload attachments first (store files, no AI — frontend already analyzed media)
+    // Upload attachments first (store files, no AI â€” frontend already analyzed media)
     const attachmentResults = [];
     const tempTicketId = null; // will attach after ticket creation
 
@@ -270,7 +280,7 @@ router.post('/express',
     // so sharedText contains all extracted text including vehicle info from OCR.
     
     if (!sharedText) {
-      // No text — just create a shell ticket with attachments
+      // No text â€” just create a shell ticket with attachments
       const { data: kNumberResult, error: kError } = await supabaseAdmin.rpc('generate_k_number');
       if (kError) throw kError;
 
@@ -319,7 +329,7 @@ router.post('/express',
       });
 
       return res.status(201).json({
-        message: `✅ Ticket #${kNumberResult} creado`,
+        message: `âœ… Ticket #${kNumberResult} creado`,
         ticket: {
           id: ticket.id,
           k_number: kNumberResult,
@@ -336,7 +346,7 @@ router.post('/express',
     const parsed = await parseTicketText(sharedText, groupCode.trim());
 
     if (!parsed.tickets || parsed.tickets.length === 0) {
-      // Parser returned nothing — create ticket with raw text only
+      // Parser returned nothing â€” create ticket with raw text only
       const { data: kNumberResult, error: kError } = await supabaseAdmin.rpc('generate_k_number');
       if (kError) throw kError;
 
@@ -384,7 +394,7 @@ router.post('/express',
       });
 
       return res.status(201).json({
-        message: `✅ Ticket #${kNumberResult} creado`,
+        message: `âœ… Ticket #${kNumberResult} creado`,
         ticket: {
           id: ticket.id,
           k_number: kNumberResult,
@@ -551,7 +561,7 @@ router.post('/express',
     });
 
     res.status(201).json({
-      message: `✅ Ticket #${kNumberResult} creado`,
+      message: `âœ… Ticket #${kNumberResult} creado`,
       ticket: {
         id: ticket.id,
         k_number: kNumberResult,
@@ -669,7 +679,7 @@ async function processExpressTicketInBackground(ticketId, sharedText, attachment
     const combinedText = textParts.join('\n\n').trim();
     
     if (!combinedText) {
-      // No text to parse — mark as completed with just attachments
+      // No text to parse â€” mark as completed with just attachments
       await supabaseAdmin.from('tickets').update({
         bg_processing_status: 'completed',
         raw_text: '[Express - solo adjuntos, sin texto]'
@@ -683,7 +693,7 @@ async function processExpressTicketInBackground(ticketId, sharedText, attachment
     const parsed = await parseTicketText(combinedText, groupCode);
 
     if (!parsed.tickets || parsed.tickets.length === 0) {
-      // Parser returned nothing — mark completed with raw text
+      // Parser returned nothing â€” mark completed with raw text
       await supabaseAdmin.from('tickets').update({
         bg_processing_status: 'completed'
       }).eq('id', ticketId);
@@ -830,7 +840,7 @@ async function processExpressTicketInBackground(ticketId, sharedText, attachment
   } catch (error) {
     console.error(`[EXPRESS-BG] Error processing ticket ${ticketId}:`, error);
     
-    // Mark as error — operator can review later
+    // Mark as error â€” operator can review later
     try {
       await supabaseAdmin.from('tickets').update({
         bg_processing_status: 'error',
@@ -852,7 +862,7 @@ router.post('/analyze-images',
   upload.array('images', 10),
   asyncHandler(async (req, res) => {
     if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: 'No se subieron imágenes', code: 'NO_FILES' });
+      return res.status(400).json({ error: 'No se subieron imÃ¡genes', code: 'NO_FILES' });
     }
 
     const images = req.files.map(file => ({
@@ -880,7 +890,7 @@ router.post('/analyze-images',
 
 /**
  * POST /api/tickets/transcribe-audio
- * Transcribe audio files via Whisper — returns text only, no ticket creation.
+ * Transcribe audio files via Whisper â€” returns text only, no ticket creation.
  * Used by Express Entry page to pre-fill the textarea with transcribed text.
  */
 router.post('/transcribe-audio',
@@ -889,7 +899,7 @@ router.post('/transcribe-audio',
   asyncHandler(async (req, res) => {
     const files = req.files || [];
     if (files.length === 0) {
-      return res.status(400).json({ error: 'No se subió archivo de audio', code: 'NO_FILE' });
+      return res.status(400).json({ error: 'No se subiÃ³ archivo de audio', code: 'NO_FILE' });
     }
 
     const transcriptions = [];
@@ -917,8 +927,8 @@ router.post('/transcribe-audio',
 
 /**
  * POST /api/tickets/generate-from-audio
- * ONE-STEP: Upload audio → Whisper transcription → AI parse → create tickets
- * Operator uploads audio + group_code → gets created tickets back immediately
+ * ONE-STEP: Upload audio â†’ Whisper transcription â†’ AI parse â†’ create tickets
+ * Operator uploads audio + group_code â†’ gets created tickets back immediately
  */
 router.post('/generate-from-audio',
   authorize(['operator', 'seller', 'admin']),
@@ -927,13 +937,13 @@ router.post('/generate-from-audio',
     // Support both single 'audio' field (legacy) and multiple 'audios' field
     const files = req.files || (req.file ? [req.file] : []);
     if (files.length === 0) {
-      return res.status(400).json({ error: 'No se subió archivo de audio', code: 'NO_FILE' });
+      return res.status(400).json({ error: 'No se subiÃ³ archivo de audio', code: 'NO_FILE' });
     }
     
     const groupCode = req.body.group_code;
     if (!groupCode) {
       for (const f of files) { try { fs.unlinkSync(f.path); } catch {} }
-      return res.status(400).json({ error: 'Código de grupo requerido', code: 'MISSING_GROUP' });
+      return res.status(400).json({ error: 'CÃ³digo de grupo requerido', code: 'MISSING_GROUP' });
     }
     
     const userId = req.user.id;
@@ -958,7 +968,7 @@ router.post('/generate-from-audio',
     
     if (!transcribedText) {
       return res.status(400).json({ 
-        error: 'No se pudo transcribir el audio o está vacío', 
+        error: 'No se pudo transcribir el audio o estÃ¡ vacÃ­o', 
         code: 'EMPTY_TRANSCRIPTION' 
       });
     }
@@ -1108,7 +1118,7 @@ router.post('/generate',
     for (const senderBlock of senderBlocks) {
       const blockRawText = senderBlock.rawText;
       
-      // --- Time-window consolidation per client spec §3 ---
+      // --- Time-window consolidation per client spec Â§3 ---
       const THREE_MINUTES_AGO = new Date(Date.now() - 3 * 60 * 1000).toISOString();
       const consolidationQuery = supabaseAdmin
         .from('tickets')
@@ -1286,7 +1296,7 @@ router.post('/generate',
     const hasConsolidation = consolidatedInto !== null && createdTickets.length === 1;
     const parseNotes = allParseNotes.filter(Boolean).join(' | ');
     const senderNote = hasSenders ? `${senderBlocks.length} remitentes detectados en el grupo` : '';
-    const combinedNotes = [senderNote, parseNotes].filter(Boolean).join(' — ');
+    const combinedNotes = [senderNote, parseNotes].filter(Boolean).join(' â€” ');
     
     if (hasConsolidation) {
       return res.status(200).json({
@@ -1312,433 +1322,11 @@ router.post('/generate',
   })
 );
 
-/**
- * Find potential duplicate tickets by comparing item descriptions.
- * 
- * Strategy:
- *  1. Normalize item text (lowercase, strip accents, remove filler words)
- *  2. Extract key tokens: part name tokens, vehicle tokens, year, numbers
- *  3. Compare using weighted Jaccard: vehicle+year matches weigh more
- *  4. Classify label per spec §10.1
- */
-async function findDuplicates(ticketData, groupCode) {
-  try {
-    // Look back 30 days for potential duplicates
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
-    const { data: recentTickets, error } = await supabaseAdmin
-      .from('tickets')
-      .select(`
-        id, k_number, group_code, raw_text, status, priority, item_count,
-        created_at, sla_exceeded, vehicle_info, assigned_to
-      `)
-      .gte('created_at', thirtyDaysAgo.toISOString())
-      .not('status', 'eq', 'en_revision')
-      .order('created_at', { ascending: false })
-      .limit(300);
-    
-    if (error || !recentTickets || recentTickets.length === 0) return [];
-    
-    // Fetch items for recent tickets (including price/brand for label logic)
-    const recentIds = recentTickets.map(t => t.id);
-    const { data: recentItems } = await supabaseAdmin
-      .from('ticket_items')
-      .select('ticket_id, parsed_description, raw_line, status, selling_price, brand, validity_status')
-      .in('ticket_id', recentIds);
-    
-    const itemsByTicket = {};
-    (recentItems || []).forEach(item => {
-      if (!itemsByTicket[item.ticket_id]) itemsByTicket[item.ticket_id] = [];
-      itemsByTicket[item.ticket_id].push(item);
-    });
-    
-    // Normalize new ticket item texts
-    const newItemTokenSets = (ticketData.items || [])
-      .map(i => normalizeForComparison(i.description || i.raw_line || ''))
-      .filter(ts => ts.allTokens.length > 0);
-    
-    // Normalize the new ticket's raw_text for direct text comparison
-    const newRawTokens = normalizeForComparison(ticketData.raw_text || '');
-    
-    if (newItemTokenSets.length === 0 && newRawTokens.allTokens.length === 0) return [];
-    
-    // New ticket's vehicle info for comparison
-    const newVehicle = ticketData.vehicle_info || null;
-    
-    const duplicates = [];
-    
-    for (const existing of recentTickets) {
-      // --- STEP 1: Vehicle must match first ---
-      const vehicleResult = compareVehicles(newVehicle, existing.vehicle_info);
-      
-      // If vehicles are clearly different → NOT a duplicate, skip
-      if (!vehicleResult.match) continue;
-
-      // --- STEP 2: Only evaluate items if vehicle passed ---
-      const existingItems = itemsByTicket[existing.id] || [];
-      const existingTokenSets = existingItems
-        .map(i => normalizeForComparison(i.parsed_description || i.raw_line || ''))
-        .filter(ts => ts.allTokens.length > 0);
-      
-      // Item-level similarity
-      let itemSimilarity = 0;
-      if (newItemTokenSets.length > 0 && existingTokenSets.length > 0) {
-        let totalScore = 0;
-        for (const newTS of newItemTokenSets) {
-          let bestMatch = 0;
-          for (const existTS of existingTokenSets) {
-            const sim = tokenSetSimilarity(newTS, existTS);
-            bestMatch = Math.max(bestMatch, sim);
-          }
-          totalScore += bestMatch;
-        }
-        itemSimilarity = totalScore / newItemTokenSets.length;
-      }
-      
-      // Raw text similarity (fallback for when items differ or don't exist yet)
-      let rawTextSimilarity = 0;
-      if (existing.raw_text && newRawTokens.allTokens.length > 0) {
-        const existingRawTokens = normalizeForComparison(existing.raw_text);
-        if (existingRawTokens.allTokens.length > 0) {
-          rawTextSimilarity = tokenSetSimilarity(newRawTokens, existingRawTokens);
-        }
-      }
-      
-      // Use the higher of the two signals
-      let similarity = Math.max(itemSimilarity, rawTextSimilarity);
-      
-      // --- STEP 3: Vehicle-aware scoring ---
-      if (vehicleResult.confidence === 'same') {
-        // Same vehicle confirmed (marca+modelo+cilindraje) → boost
-        similarity = Math.min(1.0, similarity * 1.25 + 0.1);
-      }
-      // 'compatible' → no boost (same base model but different detail level)
-      // 'unknown' (vehicle info missing) → require higher threshold
-      const threshold = vehicleResult.confidence === 'unknown' ? 0.8 : 0.5;
-      
-      if (similarity >= threshold) {
-        const label = classifyDuplicateLabel(existing, existingItems);
-        
-        console.log(`[DUP] New ticket vs #${existing.k_number} (grp:${existing.group_code}): itemSim=${itemSimilarity.toFixed(2)} rawSim=${rawTextSimilarity.toFixed(2)} final=${similarity.toFixed(2)} vehicle=${vehicleResult.confidence} threshold=${threshold} label=${label}`);
-        
-        duplicates.push({
-          ticket: existing,
-          similarity: Math.round(similarity * 100) / 100,
-          label
-        });
-      }
-    }
-    
-    // Sort per spec §10.2: positive first, then neutral, then negative
-    // Within same label, sort by similarity desc
-    const labelOrder = { dup_positive: 0, dup_neutral: 1, dup_negative: 2 };
-    duplicates.sort((a, b) => {
-      const orderDiff = (labelOrder[a.label] ?? 1) - (labelOrder[b.label] ?? 1);
-      return orderDiff !== 0 ? orderDiff : b.similarity - a.similarity;
-    });
-    
-    if (duplicates.length === 0) {
-      console.log(`[DUP] No duplicates found. Checked ${recentTickets.length} tickets, newItems=${newItemTokenSets.length}, rawTokens=${newRawTokens.allTokens.length}, newVehicle=${JSON.stringify(newVehicle)}`);
-    }
-    
-    return duplicates.slice(0, 10); // Max 10 duplicates
-  } catch (err) {
-    console.error('Duplicate detection error:', err);
-    return [];
-  }
-}
-
-/**
- * Compare vehicle info between two tickets.
- * Returns: { match: boolean, confidence: 'same'|'compatible'|'unknown'|'different' }
- *   - 'same': both have vehicle info and marca/modelo match → strong duplicate signal
- *   - 'compatible': partial info overlap, can't rule out match
- *   - 'unknown': one or both lack vehicle info entirely
- *   - 'different': both have vehicle info and they clearly differ → NOT a duplicate
- */
-function compareVehicles(vehicleA, vehicleB) {
-  const hasA = vehicleA && Object.values(vehicleA).some(Boolean);
-  const hasB = vehicleB && Object.values(vehicleB).some(Boolean);
-
-  // If neither has vehicle info, can't compare
-  if (!hasA && !hasB) return { match: true, confidence: 'unknown' };
-  // If only one has vehicle info, allow comparison but flag as unknown
-  if (!hasA || !hasB) return { match: true, confidence: 'unknown' };
-
-  const norm = (s) => s ? stripAccents(s.toLowerCase().trim()) : '';
-
-  const marcaA = norm(vehicleA.marca);
-  const marcaB = norm(vehicleB.marca);
-  const modelA = norm(vehicleA.modelo);
-  const modelB = norm(vehicleB.modelo);
-  const anioA = norm(vehicleA.anio);
-  const anioB = norm(vehicleB.anio);
-  const cilA = norm(vehicleA.cilindraje);
-  const cilB = norm(vehicleB.cilindraje);
-  const motorA = norm(vehicleA.motor);
-  const motorB = norm(vehicleB.motor);
-  const placaA = norm(vehicleA.placa);
-  const placaB = norm(vehicleB.placa);
-  const chasisA = norm(vehicleA.chasis);
-  const chasisB = norm(vehicleB.chasis);
-
-  // If both have a distinguishing field and they differ → DIFFERENT vehicle
-  if (marcaA && marcaB && marcaA !== marcaB) return { match: false, confidence: 'different' };
-  if (anioA && anioB && anioA !== anioB) return { match: false, confidence: 'different' };
-  if (motorA && motorB && motorA !== motorB) return { match: false, confidence: 'different' };
-  if (placaA && placaB && placaA !== placaB) return { match: false, confidence: 'different' };
-  if (chasisA && chasisB && chasisA !== chasisB) return { match: false, confidence: 'different' };
-  
-  // Special handling for model + cilindraje (e.g., Sail 1400 vs Sail 1500)
-  if (modelA && modelB && modelA === modelB) {
-    if (cilA && cilB && cilA !== cilB) {
-      // Same model but different engine size → different vehicles
-      return { match: false, confidence: 'different' };
-    }
-  }
-  if (modelA && modelB && modelA !== modelB) return { match: false, confidence: 'different' };
-  if (cilA && cilB && cilA !== cilB) return { match: false, confidence: 'different' };
-
-  // If marca or modelo matches → check specificity gap
-  const marcaMatch = marcaA && marcaB && marcaA === marcaB;
-  const modelMatch = modelA && modelB && modelA === modelB;
-
-  if (marcaMatch || modelMatch) {
-    // If both have cilindraje and match → same vehicle
-    if (cilA && cilB) {
-      return { match: true, confidence: 'same' };
-    }
-    // Missing cilindraje on one side → compatible (not unknown)
-    return { match: true, confidence: 'compatible' };
-  }
-
-  return { match: true, confidence: 'compatible' };
-}
-
-// Legacy wrapper used in other code paths
-function vehicleModelsMatch(vehicleA, vehicleB) {
-  return compareVehicles(vehicleA, vehicleB).match;
-}
-
-/**
- * Classify a duplicate label per spec §10.1:
- * 
- * 🟢 DUP_POSITIVE: at least one item with price/brand/confirmed availability OR ticket status Ready
- * 🔴 DUP_NEGATIVE: all items marked no disponible / no registra / not handled (closed negative)
- * 🟡 DUP_NEUTRAL:  exists but no clear positive/negative closure
- */
-function classifyDuplicateLabel(existingTicket, existingItems) {
-  // Check for positive indicators
-  const hasPositiveItem = existingItems.some(i => 
-    i.status === 'positive' && (i.selling_price || i.brand || i.validity_status === 'vigente')
-  );
-  const isTicketReady = existingTicket.status === 'ready';
-  
-  if (hasPositiveItem || isTicketReady) {
-    return 'dup_positive';
-  }
-  
-  // Check for negative indicators
-  const allNegative = existingItems.length > 0 && existingItems.every(i => 
-    i.status === 'negative' || i.status === 'no_registra'
-  );
-  const isTicketClosed = existingTicket.status === 'closed' || existingTicket.status === 'cancelled';
-  
-  if (allNegative || isTicketClosed) {
-    return 'dup_negative';
-  }
-  
-  return 'dup_neutral';
-}
-
-// ---- Text normalization & similarity for auto parts ----
-
-/** Spanish stop/filler words to remove before comparison */
-const STOP_WORDS = new Set([
-  'de', 'del', 'la', 'el', 'los', 'las', 'un', 'una', 'unos', 'unas',
-  'para', 'por', 'con', 'en', 'y', 'o', 'a', 'al', 'se', 'su', 'que',
-  'es', 'lo', 'como', 'más', 'mas', 'no', 'si', 'me', 'mi', 'te',
-  'necesito', 'necesita', 'busco', 'busca', 'requiero', 'requiere',
-  'quiero', 'favor', 'por favor', 'urgente', 'rapido', 'rápido',
-]);
-
-/** Strip accents/diacritics */
-function stripAccents(str) {
-  return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-}
-
-/**
- * Normalize a text string into token sets for comparison.
- * Returns { allTokens, yearTokens, numberTokens, partTokens, oemTokens }
- * 
- * Key: hyphenated alphanumeric codes (OEM part numbers like 26300-35503)
- * are preserved as single tokens, NOT split into separate numbers.
- */
-function normalizeForComparison(text) {
-  if (!text) return { allTokens: [], yearTokens: [], numberTokens: [], partTokens: [], oemTokens: [] };
-  
-  let normalized = stripAccents(text.toLowerCase().trim());
-  
-  // Step 1: Extract and preserve OEM part codes (alphanumeric-hyphen patterns like 26300-35503, 1KR-FE)
-  const oemCodes = [];
-  normalized = normalized.replace(/\b([a-z0-9]{2,}(?:-[a-z0-9]{2,})+)\b/g, (match) => {
-    oemCodes.push(match);
-    return ' '; // remove from text so it doesn't get double-counted
-  });
-  
-  // Step 2: Strip remaining punctuation, normalize spaces
-  normalized = normalized
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  
-  const words = normalized.split(' ').filter(w => w.length >= 2 && !STOP_WORDS.has(w));
-  
-  // Classify tokens
-  const yearTokens = [];
-  const numberTokens = [];
-  const partTokens = [];
-  const oemTokens = oemCodes; // full OEM codes preserved with hyphens
-  
-  for (const w of words) {
-    if (/^(19|20)\d{2}$/.test(w)) {
-      yearTokens.push(w); // Year like 2020
-    } else if (/^\d+$/.test(w)) {
-      numberTokens.push(w); // Pure number
-    } else {
-      partTokens.push(w); // Part/vehicle name token
-    }
-  }
-  
-  // allTokens includes everything for Jaccard calculation
-  const allTokens = [...words, ...oemCodes];
-  
-  return { allTokens, yearTokens, numberTokens, partTokens, oemTokens };
-}
-
-/**
- * Weighted token-set similarity for auto parts.
- * 
- * Scoring strategy:
- *  - OEM code exact match (e.g. "26300-35503"): very high weight (worth 3 normal tokens)
- *  - Part name tokens (e.g. "filtro", "aceite"): standard weight (1.0)
- *  - Year tokens: bonus if matching
- *  - Number-only tokens: reduced weight (0.3) — common prefixes like "26300" alone are weak signals
- *  - Fuzzy part matches: half credit
- */
-function tokenSetSimilarity(ts1, ts2) {
-  if (ts1.allTokens.length === 0 && ts2.allTokens.length === 0) return 1;
-  if (ts1.allTokens.length === 0 || ts2.allTokens.length === 0) return 0;
-  
-  // --- Weighted scoring instead of simple Jaccard ---
-  let weightedIntersection = 0;
-  let weightedUnion = 0;
-  
-  // 1. OEM codes (highest value — full part number match is very specific)
-  const oemSet1 = new Set(ts1.oemTokens || []);
-  const oemSet2 = new Set(ts2.oemTokens || []);
-  const OEM_WEIGHT = 3.0;
-  for (const code of oemSet1) {
-    weightedUnion += OEM_WEIGHT;
-    if (oemSet2.has(code)) weightedIntersection += OEM_WEIGHT;
-  }
-  for (const code of oemSet2) {
-    if (!oemSet1.has(code)) weightedUnion += OEM_WEIGHT;
-  }
-  
-  // 2. Part name tokens (standard value)
-  const partSet1 = new Set(ts1.partTokens || []);
-  const partSet2 = new Set(ts2.partTokens || []);
-  const PART_WEIGHT = 1.0;
-  for (const t of partSet1) {
-    weightedUnion += PART_WEIGHT;
-    if (partSet2.has(t)) weightedIntersection += PART_WEIGHT;
-  }
-  for (const t of partSet2) {
-    if (!partSet1.has(t)) weightedUnion += PART_WEIGHT;
-  }
-  
-  // 3. Number-only tokens (low value — generic numbers like "26300" are weak signals)
-  const numSet1 = new Set(ts1.numberTokens || []);
-  const numSet2 = new Set(ts2.numberTokens || []);
-  const NUM_WEIGHT = 0.3;
-  for (const t of numSet1) {
-    weightedUnion += NUM_WEIGHT;
-    if (numSet2.has(t)) weightedIntersection += NUM_WEIGHT;
-  }
-  for (const t of numSet2) {
-    if (!numSet1.has(t)) weightedUnion += NUM_WEIGHT;
-  }
-  
-  const baseScore = weightedUnion > 0 ? weightedIntersection / weightedUnion : 0;
-  
-  // 4. Fuzzy matching bonus for part tokens (e.g. "parabris" ≈ "parabrisas")
-  let fuzzyBonus = 0;
-  const unmatchedParts1 = ts1.partTokens.filter(t => !partSet2.has(t));
-  for (const token of unmatchedParts1) {
-    for (const token2 of ts2.partTokens) {
-      if (!partSet1.has(token2) && fuzzyMatch(token, token2)) {
-        fuzzyBonus += 0.5;
-        break;
-      }
-    }
-  }
-  const fuzzyScore = ts1.partTokens.length > 0 
-    ? fuzzyBonus / Math.max(ts1.partTokens.length, ts2.partTokens.length, 1) 
-    : 0;
-  
-  // 5. Year match bonus
-  const yearMatch = ts1.yearTokens.length > 0 && ts2.yearTokens.length > 0 &&
-    ts1.yearTokens.some(y => ts2.yearTokens.includes(y));
-  const yearBonus = yearMatch ? 0.1 : 0;
-  
-  return Math.min(1.0, baseScore + fuzzyScore * 0.15 + yearBonus);
-}
-
-/**
- * Fuzzy match: returns true if one token starts with the other (min 4 chars)
- * or if Levenshtein distance is <= 2 for tokens of length >= 5.
- */
-function fuzzyMatch(a, b) {
-  if (a.length < 4 || b.length < 4) return false;
-  
-  // Prefix match (e.g. "parabris" matches "parabrisas")
-  if (a.startsWith(b) || b.startsWith(a)) return true;
-  
-  // Levenshtein for tokens >= 5 chars
-  if (a.length >= 5 && b.length >= 5) {
-    return levenshteinDistance(a, b) <= 2;
-  }
-  
-  return false;
-}
-
-/**
- * Levenshtein distance between two strings
- */
-function levenshteinDistance(a, b) {
-  const matrix = [];
-  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
-  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
-  
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
-      const cost = a[j - 1] === b[i - 1] ? 0 : 1;
-      matrix[i][j] = Math.min(
-        matrix[i - 1][j] + 1,     // deletion
-        matrix[i][j - 1] + 1,     // insertion
-        matrix[i - 1][j - 1] + cost // substitution
-      );
-    }
-  }
-  return matrix[b.length][a.length];
-}
 
 /**
  * GET /api/tickets/alerts/pending
  * Get pending ticket alerts (tickets not taken after 5 and 10 minutes)
- * Per client spec §7: Only visible to Dispatcher and Admin
+ * Per client spec Â§7: Only visible to Dispatcher and Admin
  * NOTE: Must be defined BEFORE /:id routes to avoid matching "alerts" as a ticket ID
  */
 router.get('/alerts/pending',
@@ -1764,7 +1352,7 @@ router.delete('/bulk',
     }
 
     if (ticket_ids.length > 100) {
-      return res.status(400).json({ error: 'Máximo 100 tickets por operación', code: 'TOO_MANY' });
+      return res.status(400).json({ error: 'MÃ¡ximo 100 tickets por operaciÃ³n', code: 'TOO_MANY' });
     }
 
     const userId = req.user.id;
@@ -1829,14 +1417,14 @@ router.get('/', asyncHandler(async (req, res) => {
       revision_origin_seller:users!tickets_revision_origin_seller_id_fkey(id, full_name)
     `, { count: 'exact' });
   
-  // Per client spec §1: Seller only sees their own assigned tickets
+  // Per client spec Â§1: Seller only sees their own assigned tickets
   // (except pending tickets which are available for anyone to take)
   // Sellers: pending queue + all duplicate-review tickets + own assignments
   if (userRole === 'seller') {
     query = query.or(`status.eq.pending,status.eq.pending_review,status.eq.en_revision,assigned_to.eq.${userId},revision_origin_seller_id.eq.${userId}`);
   }
   
-  // Per client spec §1: Operator cannot see ticket work queue (generate only)
+  // Per client spec Â§1: Operator cannot see ticket work queue (generate only)
   // They can still view the list for reference but won't see action buttons
   
   // Apply filters (support comma-separated statuses like 'pending,en_revision')
@@ -1851,8 +1439,8 @@ router.get('/', asyncHandler(async (req, res) => {
     // Default: exclude terminal statuses from the active work queue
     query = query.not('status', 'in', '("closed","cancelled","reenviado")');
   }
-  // status === 'all' → no filter applied, returns everything
-  // Carril filter: C0 = 1 item, C1 = 2–3 items, C2 = 4+ items
+  // status === 'all' â†’ no filter applied, returns everything
+  // Carril filter: C0 = 1 item, C1 = 2â€“3 items, C2 = 4+ items
   if (carril === 'C0') {
     query = query.lte('item_count', 1);
   } else if (carril === 'C1') {
@@ -1910,9 +1498,16 @@ router.get('/', asyncHandler(async (req, res) => {
     ...ticket,
     quote_total: quoteTotals[ticket.id] || null
   }));
+
+  const ticketIds = ticketsWithTotal.map(t => t.id);
+  const coincidenceCounts = await getCoincidenceCountsForTickets(ticketIds);
+  const ticketsWithCoincidences = ticketsWithTotal.map(ticket => ({
+    ...ticket,
+    coincidence_count: coincidenceCounts[ticket.id] || 0,
+  }));
   
   res.json({
-    tickets: ticketsWithTotal,
+    tickets: ticketsWithCoincidences,
     pagination: {
       page: parseInt(page),
       limit: parseInt(limit),
@@ -1921,6 +1516,89 @@ router.get('/', asyncHandler(async (req, res) => {
     }
   });
 }));
+
+/**
+ * GET /api/tickets/:id/coincidences
+ * Lazy-load coincidence details (on-demand)
+ */
+router.get('/:id/coincidences',
+  authorize(['seller', 'dispatcher', 'admin']),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const result = await getCoincidencesDetail(id);
+    if (!result) {
+      return res.status(404).json({ error: 'Ticket no encontrado', code: 'NOT_FOUND' });
+    }
+    res.json(result);
+  })
+);
+
+/**
+ * GET /api/tickets/:id/coincidences/:sourceId/compare
+ * Line-by-line comparison (on-demand)
+ */
+router.get('/:id/coincidences/:sourceId/compare',
+  authorize(['seller', 'dispatcher', 'admin']),
+  asyncHandler(async (req, res) => {
+    const { id, sourceId } = req.params;
+    const result = await compareCoincidences(id, sourceId);
+    if (!result) {
+      return res.status(404).json({ error: 'Ticket no encontrado', code: 'NOT_FOUND' });
+    }
+    res.json(result);
+  })
+);
+
+/**
+ * POST /api/tickets/:id/coincidences/:sourceId/copy
+ * Selective copy of matched lines
+ */
+const copyCoincidenceSchema = z.object({
+  mappings: z.array(z.object({
+    target_item_id: z.string().uuid(),
+    source_item_id: z.string().uuid(),
+  })).min(1).max(100),
+});
+
+router.post('/:id/coincidences/:sourceId/copy',
+  authorize(['seller', 'dispatcher', 'admin']),
+  asyncHandler(async (req, res) => {
+    const { id, sourceId } = req.params;
+    const validated = copyCoincidenceSchema.parse(req.body);
+    const userId = req.user.id;
+
+    const lockStatus = await getLockStatus(id);
+    if (lockStatus.locked && lockStatus.locked_by !== userId && req.user.role !== 'admin' && req.user.role !== 'dispatcher') {
+      return res.status(423).json({ error: 'Ticket is locked by another user', code: 'TICKET_LOCKED' });
+    }
+
+    const result = await copySelectedItems(id, sourceId, validated.mappings, userId);
+    if (result.error) {
+      return res.status(404).json({ error: result.message, code: result.error });
+    }
+    res.json(result);
+  })
+);
+
+/**
+ * GET /api/tickets/:id/references/search?q=
+ * Manual reference search (on-demand)
+ */
+router.get('/:id/references/search',
+  authorize(['seller', 'dispatcher', 'admin']),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const q = String(req.query.q || '').trim();
+    if (!q) {
+      return res.status(400).json({ error: 'Parametro q requerido', code: 'MISSING_QUERY' });
+    }
+    const result = await searchReferences(id, q);
+    if (!result) {
+      return res.status(404).json({ error: 'Ticket no encontrado', code: 'NOT_FOUND' });
+    }
+    res.json(result);
+  })
+);
 
 /**
  * GET /api/tickets/:id
@@ -1990,78 +1668,20 @@ router.get('/:id', asyncHandler(async (req, res) => {
     .select('id, k_number, group_code, status, created_at, extension_group_code')
     .eq('parent_ticket_id', id);
   
-  // Load stored duplicates from DB first
-  let duplicates = [];
-  try {
-    const { data: storedDups } = await supabaseAdmin
-      .from('duplicate_references')
-      .select(`
-        id, similarity_score, label,
-        duplicate_ticket:tickets!duplicate_references_duplicate_ticket_id_fkey(
-          id, k_number, group_code, status, priority, item_count, created_at, sla_exceeded
-        )
-      `)
-      .eq('ticket_id', id);
-    
-    if (storedDups && storedDups.length > 0) {
-      duplicates = storedDups
-        .filter(d => d.duplicate_ticket)
-        .map(d => ({
-          ticket: d.duplicate_ticket,
-          similarity: (d.similarity_score || 0) / 100,
-          label: d.label || 'dup_neutral'
-        }));
-    }
-    
-    // Also check reverse direction (this ticket might be a duplicate OF another)
-    const { data: reverseDups } = await supabaseAdmin
-      .from('duplicate_references')
-      .select(`
-        id, similarity_score, label,
-        source_ticket:tickets!duplicate_references_ticket_id_fkey(
-          id, k_number, group_code, status, priority, item_count, created_at, sla_exceeded
-        )
-      `)
-      .eq('duplicate_ticket_id', id);
-    
-    if (reverseDups && reverseDups.length > 0) {
-      const existingIds = new Set(duplicates.map(d => d.ticket.id));
-      for (const rd of reverseDups) {
-        if (rd.source_ticket && !existingIds.has(rd.source_ticket.id)) {
-          duplicates.push({
-            ticket: rd.source_ticket,
-            similarity: (rd.similarity_score || 0) / 100,
-            label: rd.label || 'dup_neutral'
-          });
-        }
-      }
-    }
-    
-    // If no stored duplicates, do live detection
-    if (duplicates.length === 0) {
-      const ticketData = {
-        items: items.map(i => ({
-          description: i.parsed_description,
-          raw_line: i.raw_line
-        }))
-      };
-      const liveDups = await findDuplicates(ticketData, ticket.group_code);
-      duplicates = liveDups.filter(d => d.ticket.id !== id);
-    }
-  } catch (err) {
-    console.error('Duplicate detection failed:', err);
-  }
+  // Lightweight coincidence count only (details loaded on demand)
+  const coincidenceCounts = await getCoincidenceCountsForTickets([id]);
+  const coincidence_count = coincidenceCounts[id] || 0;
   
   res.json({
     ticket: {
       ...ticket,
-      sla_status: getSlaStatus(ticket)
+      sla_status: getSlaStatus(ticket),
+      coincidence_count,
     },
     items: itemsWithAlts,
     blocks,
     lock_status: lockStatus,
     extensions: extensions || [],
-    duplicates
   });
 }));
 
@@ -2089,7 +1709,7 @@ router.put('/:id',
     }
     
     // Check lock inline (skip separate getLockStatus call)
-    // Skip lock check for pedido-related transitions (pedido→closed, ready→pedido)
+    // Skip lock check for pedido-related transitions (pedidoâ†’closed, readyâ†’pedido)
     // Skip lock check for vehicle_info-only updates (metadata, not item work)
     const isPedidoFlow = currentTicket.status === 'pedido' || (validated.status === 'pedido' && currentTicket.status === 'ready');
     const isVehicleOnlyUpdate = validated.vehicle_info && !validated.status && !validated.priority;
@@ -2100,7 +1720,7 @@ router.put('/:id',
       }
     }
     
-    // --- Enforce status transition rules per client spec §1-§2 ---
+    // --- Enforce status transition rules per client spec Â§1-Â§2 ---
     if (validated.status && validated.status !== currentTicket.status) {
       const fromStatus = currentTicket.status;
       const toStatus = validated.status;
@@ -2109,23 +1729,23 @@ router.put('/:id',
       const allowedTransitions = VALID_TRANSITIONS[fromStatus] || [];
       if (!allowedTransitions.includes(toStatus)) {
         return res.status(400).json({
-          error: `Transición de estado no válida: ${fromStatus} → ${toStatus}`,
+          error: `TransiciÃ³n de estado no vÃ¡lida: ${fromStatus} â†’ ${toStatus}`,
           code: 'INVALID_TRANSITION',
           allowed: allowedTransitions
         });
       }
       
       // Check if user's role is allowed for this transition
-      const transitionKey = `${fromStatus}→${toStatus}`;
+      const transitionKey = `${fromStatus}â†’${toStatus}`;
       const allowedRoles = TRANSITION_ROLES[transitionKey];
       if (allowedRoles && !allowedRoles.includes(userRole)) {
         return res.status(403).json({
-          error: `Tu rol (${userRole}) no puede realizar esta transición: ${fromStatus} → ${toStatus}`,
+          error: `Tu rol (${userRole}) no puede realizar esta transiciÃ³n: ${fromStatus} â†’ ${toStatus}`,
           code: 'ROLE_FORBIDDEN'
         });
       }
       
-      // Per client spec §8: Only the assigned seller can close (pedido → closed)
+      // Per client spec Â§8: Only the assigned seller can close (pedido â†’ closed)
       if (toStatus === 'closed' && userRole === 'seller') {
         if (currentTicket.assigned_to !== userId) {
           return res.status(403).json({
@@ -2135,7 +1755,7 @@ router.put('/:id',
         }
       }
       
-      // Per client spec §8: Dispatcher cannot close tickets
+      // Per client spec Â§8: Dispatcher cannot close tickets
       if (toStatus === 'closed' && userRole === 'dispatcher') {
         return res.status(403).json({
           error: 'El dispatcher no puede cerrar tickets',
@@ -2150,7 +1770,7 @@ router.put('/:id',
       updated_by: userId
     };
     
-    // Track closed_at timestamp per client spec §8
+    // Track closed_at timestamp per client spec Â§8
     if (validated.status === 'closed' && currentTicket.status !== 'closed') {
       updateData.closed_at = new Date().toISOString();
     }
@@ -2179,7 +1799,7 @@ router.put('/:id',
     
     if (error) throw error;
     
-    // Per client spec §6: Reset SLA timer on activity (status change back to in_progress)
+    // Per client spec Â§6: Reset SLA timer on activity (status change back to in_progress)
     if (validated.status && validated.status !== currentTicket.status && 
         validated.status === 'in_progress') {
       resetSlaTimer(id).catch(e => console.error('Failed to reset SLA timer:', e));
@@ -2280,7 +1900,7 @@ router.post('/:id/take',
     
     if (updateErr) throw updateErr;
     
-    // Respond immediately — audit log in background (non-blocking)
+    // Respond immediately â€” audit log in background (non-blocking)
     res.json({
       message: 'Ticket tomado exitosamente',
       ticket: updatedTicket,
@@ -2324,7 +1944,7 @@ router.post('/:id/release',
     }
     
     // Per client spec: releasing sends ticket back to 'pending'
-    // (in_progress or en_revision duplicate — not left stuck)
+    // (in_progress or en_revision duplicate â€” not left stuck)
     const ticket = result.ticket;
     if (ticket.status === 'in_progress' || ticket.status === 'en_revision') {
       const { data: updatedTicket } = await supabaseAdmin
@@ -2412,7 +2032,7 @@ router.put('/:ticketId/items/bulk-status',
       return res.status(404).json({ error: 'Ticket no encontrado', code: 'NOT_FOUND' });
     }
     if (['closed', 'cancelled'].includes(ticket.status)) {
-      return res.status(400).json({ error: 'No se pueden modificar ítems de un ticket cerrado o cancelado', code: 'TICKET_CLOSED' });
+      return res.status(400).json({ error: 'No se pueden modificar Ã­tems de un ticket cerrado o cancelado', code: 'TICKET_CLOSED' });
     }
 
     // Check ticket lock
@@ -2446,7 +2066,7 @@ router.put('/:ticketId/items/bulk-status',
 /**
  * PUT /api/tickets/:ticketId/items/bulk-quote
  * Batch update multiple items with inline quote data (price, brand, note, status).
- * Used by the "Cotización Rápida" (Quick Quote) feature.
+ * Used by the "CotizaciÃ³n RÃ¡pida" (Quick Quote) feature.
  */
 const bulkQuoteAlternativeSchema = z.object({
   selling_price: z.number().positive().optional().nullable(),
@@ -2489,10 +2109,10 @@ router.put('/:ticketId/items/bulk-quote',
       return res.status(404).json({ error: 'Ticket no encontrado', code: 'NOT_FOUND' });
     }
     if (['closed', 'cancelled'].includes(ticket.status)) {
-      return res.status(400).json({ error: 'No se pueden modificar ítems de un ticket cerrado o cancelado', code: 'TICKET_CLOSED' });
+      return res.status(400).json({ error: 'No se pueden modificar Ã­tems de un ticket cerrado o cancelado', code: 'TICKET_CLOSED' });
     }
 
-    // Check ticket lock — allow pedido status without lock
+    // Check ticket lock â€” allow pedido status without lock
     if (!['pedido'].includes(ticket.status)) {
       const lockStatus = await getLockStatus(ticketId);
       if (lockStatus.locked && lockStatus.locked_by !== userId) {
@@ -2663,7 +2283,7 @@ router.delete('/:ticketId/items/:itemId/alternatives/:altId',
  * Add a new item manually to an existing ticket
  */
 const addItemSchema = z.object({
-  description: z.string().min(1, 'Descripción es requerida'),
+  description: z.string().min(1, 'DescripciÃ³n es requerida'),
   quantity: z.number().int().positive().default(1)
 });
 
@@ -2685,7 +2305,7 @@ router.post('/:ticketId/items',
       return res.status(404).json({ error: 'Ticket no encontrado', code: 'NOT_FOUND' });
     }
     if (['closed', 'cancelled'].includes(ticket.status)) {
-      return res.status(400).json({ error: 'No se pueden agregar ítems a un ticket cerrado o cancelado', code: 'TICKET_CLOSED' });
+      return res.status(400).json({ error: 'No se pueden agregar Ã­tems a un ticket cerrado o cancelado', code: 'TICKET_CLOSED' });
     }
 
     // Check ticket lock
@@ -2848,7 +2468,7 @@ router.delete('/:ticketId/items/:itemId',
 
     // Prevent deleting the last item
     if ((ticket.item_count || 1) <= 1) {
-      return res.status(400).json({ error: 'No se puede eliminar el único item del ticket', code: 'LAST_ITEM' });
+      return res.status(400).json({ error: 'No se puede eliminar el Ãºnico item del ticket', code: 'LAST_ITEM' });
     }
 
     // Delete the item
@@ -2886,7 +2506,7 @@ router.delete('/:ticketId/items/:itemId',
 /**
  * POST /api/tickets/:id/use-as-base/:sourceId
  * Copy item data (prices, codes, status) from a source duplicate ticket
- * This does NOT edit the source — it copies results into the current ticket
+ * This does NOT edit the source â€” it copies results into the current ticket
  */
 router.post('/:id/use-as-base/:sourceId',
   authorize(['seller', 'admin']),
@@ -3243,7 +2863,7 @@ router.get('/:id/blocks/:blockType', asyncHandler(async (req, res) => {
 /**
  * POST /api/tickets/:id/merge/:sourceId
  * Merge source ticket into target ticket
- * Per client spec §4: Only Dispatcher and Admin can merge
+ * Per client spec Â§4: Only Dispatcher and Admin can merge
  */
 router.post('/:id/merge/:sourceId',
   authorize(['dispatcher', 'admin']),
@@ -3363,7 +2983,7 @@ router.post('/:id/merge/:sourceId',
 /**
  * POST /api/tickets/:id/unmerge
  * Unmerge a previously merged ticket
- * Per client spec §4: Only Admin can unmerge. Cannot unmerge if target is in 'pedido' status.
+ * Per client spec Â§4: Only Admin can unmerge. Cannot unmerge if target is in 'pedido' status.
  */
 router.post('/:id/unmerge',
   authorize(['admin']),
@@ -3386,7 +3006,7 @@ router.post('/:id/unmerge',
       return res.status(400).json({ error: 'Ticket is not merged', code: 'NOT_MERGED' });
     }
     
-    // Check target ticket status - cannot unmerge if in 'pedido' per client spec §4
+    // Check target ticket status - cannot unmerge if in 'pedido' per client spec Â§4
     const { data: targetTicket } = await supabaseAdmin
       .from('tickets')
       .select('id, k_number, status')
@@ -3395,7 +3015,7 @@ router.post('/:id/unmerge',
     
     if (targetTicket && targetTicket.status === 'pedido') {
       return res.status(400).json({
-        error: 'No se puede desfusionar: el ticket destino está en estado Pedido',
+        error: 'No se puede desfusionar: el ticket destino estÃ¡ en estado Pedido',
         code: 'CANNOT_UNMERGE_PEDIDO'
       });
     }
