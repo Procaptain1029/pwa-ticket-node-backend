@@ -88,7 +88,7 @@ const VALID_TRANSITIONS = {
   pending_review: ['in_progress', 'en_revision', 'cancelled'],
   in_progress:    ['ready', 'en_revision', 'cancelled'],
   ready:          ['pedido', 'in_progress', 'cancelled'],
-  pedido:         ['closed'],
+  pedido:         ['closed', 'ready'],
   en_revision:    ['pending', 'in_progress', 'cancelled'],
   closed:         [], // terminal state
   cancelled:      ['pending'], // admin can reopen
@@ -100,7 +100,7 @@ const TRANSITION_ROLES = {
   // Seller transitions
   'in_progressâ†’ready': ['seller', 'admin'],
   'readyâ†’pedido': ['seller', 'dispatcher', 'admin'],
-  'pedidoâ†’closed': ['seller', 'admin'], // only the assigned seller or admin
+  'pedidoâ†’closed': ['seller', 'admin'],   // only the assigned seller or admin
   // Dispatcher transitions
   'pendingâ†’en_revision': ['dispatcher', 'admin'],
   'pending_reviewâ†’en_revision': ['dispatcher', 'admin'],
@@ -1737,7 +1737,10 @@ router.put('/:id',
       
       // Check if user's role is allowed for this transition
       const transitionKey = `${fromStatus}â†’${toStatus}`;
-      const allowedRoles = TRANSITION_ROLES[transitionKey];
+      let allowedRoles = TRANSITION_ROLES[transitionKey];
+      if (!allowedRoles && fromStatus === 'pedido' && toStatus === 'ready') {
+        allowedRoles = ['seller', 'dispatcher', 'admin'];
+      }
       if (allowedRoles && !allowedRoles.includes(userRole)) {
         return res.status(403).json({
           error: `Tu rol (${userRole}) no puede realizar esta transiciÃ³n: ${fromStatus} â†’ ${toStatus}`,
@@ -2085,6 +2088,8 @@ const bulkQuoteItemSchema = z.object({
   alternatives: z.array(bulkQuoteAlternativeSchema).optional(),
   parsed_description: z.string().optional().nullable(),
   quantity: z.number().int().min(1).optional(),
+  supplier_code: z.string().optional().nullable(),
+  codigo_distrimia: z.string().optional().nullable(),
 });
 
 const bulkQuoteSchema = z.object({
@@ -2132,6 +2137,8 @@ router.put('/:ticketId/items/bulk-quote',
       if (itemData.estimated_delivery !== undefined) updatePayload.estimated_delivery = itemData.estimated_delivery;
       if (itemData.parsed_description !== undefined) updatePayload.parsed_description = itemData.parsed_description;
       if (itemData.quantity !== undefined) updatePayload.quantity = itemData.quantity;
+      if (itemData.supplier_code !== undefined) updatePayload.supplier_code = itemData.supplier_code;
+      if (itemData.codigo_distrimia !== undefined) updatePayload.codigo_distrimia = itemData.codigo_distrimia;
       updatePayload.updated_at = new Date().toISOString();
 
       const { data: updated, error: updateErr } = await supabaseAdmin
