@@ -2464,6 +2464,7 @@ const bulkQuoteItemSchema = z.object({
   estimated_delivery: z.string().optional().nullable(),
   alternatives: z.array(bulkQuoteAlternativeSchema).optional(),
   parsed_description: z.string().optional().nullable(),
+  quantity: z.number().int().min(1).optional(),
 });
 
 const bulkQuoteSchema = z.object({
@@ -2510,6 +2511,7 @@ router.put('/:ticketId/items/bulk-quote',
       if (itemData.seller_note !== undefined) updatePayload.seller_note = itemData.seller_note;
       if (itemData.estimated_delivery !== undefined) updatePayload.estimated_delivery = itemData.estimated_delivery;
       if (itemData.parsed_description !== undefined) updatePayload.parsed_description = itemData.parsed_description;
+      if (itemData.quantity !== undefined) updatePayload.quantity = itemData.quantity;
       updatePayload.updated_at = new Date().toISOString();
 
       const { data: updated, error: updateErr } = await supabaseAdmin
