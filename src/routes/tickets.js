@@ -1778,8 +1778,10 @@ router.put('/:id',
       updateData.closed_at = new Date().toISOString();
     }
     
-    // Auto-release lock when transitioning to ready/closed (saves a separate API call from frontend)
-    if (validated.status && ['ready', 'closed'].includes(validated.status)) {
+    // Auto-release lock when transitioning to ready/pedido/closed
+    // Pedido allows free edits by role (seller/admin), so any stale lock should be cleared
+    // to avoid the misleading "read-only" banner on the frontend.
+    if (validated.status && ['ready', 'pedido', 'closed'].includes(validated.status)) {
       updateData.locked_by = null;
       updateData.locked_at = null;
       updateData.lock_expires_at = null;
