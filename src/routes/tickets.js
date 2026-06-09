@@ -1146,56 +1146,87 @@ router.post('/generate',
       // If there's a recent ticket from the same sender within 3 min, consolidate
       if (recentSameGroup && recentSameGroup.length > 0) {
         const existingTicket = recentSameGroup[0];
-        
-        let maxOrder = 0;
-        const { data: existingItems } = await supabaseAdmin
+
+        // Fetch full existing items to compute duplicate-request guard + maxOrder
+        const { data: existingItemsFull } = await supabaseAdmin
           .from('ticket_items')
-          .select('item_order')
+          .select('item_order, parsed_description, raw_line, created_at')
           .eq('ticket_id', existingTicket.id)
-          .order('item_order', { ascending: false })
-          .limit(1);
-        
-        if (existingItems && existingItems.length > 0) {
-          maxOrder = existingItems[0].item_order;
+          .order('item_order', { ascending: true });
+
+        let maxOrder = 0;
+        if (existingItemsFull && existingItemsFull.length > 0) {
+          maxOrder = existingItemsFull[existingItemsFull.length - 1].item_order;
         }
-        
+
+        const normalize = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const existingDescSet = new Set((existingItemsFull || []).map(i => normalize(i.parsed_description || i.raw_line)));
+
+        // Defensive dedup: if the parsed items are entirely a subset of the
+        // existing items (and added very recently), treat as a duplicate request
+        // (e.g. browser retried the POST) and skip the append to avoid doubling.
+        const RECENT_WINDOW_MS = 30 * 1000;
+        const recentlyAdded = (existingItemsFull || []).filter(i => i.created_at && (Date.now() - new Date(i.created_at).getTime()) < RECENT_WINDOW_MS);
+        const recentlyAddedSet = new Set(recentlyAdded.map(i => normalize(i.parsed_description || i.raw_line)));
+
+        let totalNewItemsAdded = 0;
         for (const ticketData of parsed.tickets) {
-          if (ticketData.items && ticketData.items.length > 0) {
-            const itemsToInsert = ticketData.items.map((item, idx) => ({
-              ticket_id: existingTicket.id,
-              item_order: maxOrder + idx + 1,
-              raw_line: item.raw_line,
-              parsed_description: item.description,
-              quantity: item.quantity || 1,
-              status: item.status || 'pending_info'
-            }));
-            
-            await supabaseAdmin.from('ticket_items').insert(itemsToInsert);
-            maxOrder += ticketData.items.length;
+          if (!ticketData.items || ticketData.items.length === 0) continue;
+
+          // Filter out items that already exist in the ticket (avoid duplicating on retry)
+          const newItems = ticketData.items.filter(it => !existingDescSet.has(normalize(it.description || it.raw_line)));
+
+          // If all items in this batch already exist AND were inserted within the last 30s,
+          // this is almost certainly a duplicate request — skip silently.
+          const allDup = newItems.length === 0 && ticketData.items.every(it => recentlyAddedSet.has(normalize(it.description || it.raw_line)));
+          if (allDup) {
+            console.warn(`[GENERATE] Duplicate request detected for ticket ${existingTicket.k_number}, skipping ${ticketData.items.length} items`);
+            continue;
           }
+
+          if (newItems.length === 0) continue;
+
+          const itemsToInsert = newItems.map((item, idx) => ({
+            ticket_id: existingTicket.id,
+            item_order: maxOrder + idx + 1,
+            raw_line: item.raw_line,
+            parsed_description: item.description,
+            quantity: item.quantity || 1,
+            status: item.status || 'pending_info'
+          }));
+
+          await supabaseAdmin.from('ticket_items').insert(itemsToInsert);
+          maxOrder += newItems.length;
+          totalNewItemsAdded += newItems.length;
+
+          // Update local set so subsequent ticketData batches in the same request also dedup
+          newItems.forEach(it => existingDescSet.add(normalize(it.description || it.raw_line)));
         }
-        
-        const { data: updatedTicket } = await supabaseAdmin
-          .from('tickets')
-          .update({
-            item_count: maxOrder,
-            raw_text: existingTicket.raw_text + '\n---\n' + blockRawText,
-            updated_by: userId
-          })
-          .eq('id', existingTicket.id)
-          .select()
-          .single();
-        
-        consolidatedInto = updatedTicket || existingTicket;
-        
-        await supabaseAdmin.from('audit_log').insert({
-          entity_type: 'ticket',
-          entity_id: existingTicket.id,
-          action: 'consolidate',
-          new_values: { new_items_added: maxOrder - (existingTicket.item_count || 0), sender: senderBlock.sender },
-          performed_by: userId
-        });
-        
+
+        let updatedTicket = existingTicket;
+        if (totalNewItemsAdded > 0) {
+          const { data: updRes } = await supabaseAdmin
+            .from('tickets')
+            .update({
+              item_count: maxOrder,
+              raw_text: existingTicket.raw_text + '\n---\n' + blockRawText,
+              updated_by: userId
+            })
+            .eq('id', existingTicket.id)
+            .select()
+            .single();
+          if (updRes) updatedTicket = updRes;
+
+          await supabaseAdmin.from('audit_log').insert({
+            entity_type: 'ticket',
+            entity_id: existingTicket.id,
+            action: 'consolidate',
+            new_values: { new_items_added: totalNewItemsAdded, sender: senderBlock.sender },
+            performed_by: userId
+          });
+        }
+
+        consolidatedInto = updatedTicket;
         createdTickets.push(consolidatedInto);
         continue; // Next sender block
       }
