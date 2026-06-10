@@ -11,6 +11,7 @@ import { parseTicketText } from '../services/ticketParser.js';
 import { uploadAttachment, getAttachments, getAttachmentUrl, transcribeAudio, analyzeMultipleImages } from '../services/mediaProcessor.js';
 import { 
   generateControlBlock, 
+  generateControlAB,
   generateCustomerProformaBlock,
   generateAuxSeguimientoBlock,
   generateReenviosBlock,
@@ -138,7 +139,8 @@ const updateItemSchema = z.object({
   seller_note: z.string().optional().nullable(),
   internal_note: z.string().optional().nullable(),
   pedido_excluded: z.boolean().optional(),
-  quantity: z.number().int().min(1).optional()
+  quantity: z.number().int().min(1).optional(),
+  control_group: z.enum(['A', 'B']).optional().nullable()
 });
 
 // Multer config for file uploads (images + audio)
@@ -2123,6 +2125,7 @@ const bulkQuoteItemSchema = z.object({
   quantity: z.number().int().min(1).optional(),
   supplier_code: z.string().optional().nullable(),
   codigo_distrimia: z.string().optional().nullable(),
+  control_group: z.enum(['A', 'B']).optional().nullable(),
 });
 
 const bulkQuoteSchema = z.object({
@@ -2172,6 +2175,7 @@ router.put('/:ticketId/items/bulk-quote',
       if (itemData.quantity !== undefined) updatePayload.quantity = itemData.quantity;
       if (itemData.supplier_code !== undefined) updatePayload.supplier_code = itemData.supplier_code;
       if (itemData.codigo_distrimia !== undefined) updatePayload.codigo_distrimia = itemData.codigo_distrimia;
+      if (itemData.control_group !== undefined) updatePayload.control_group = itemData.control_group;
       updatePayload.updated_at = new Date().toISOString();
 
       const { data: updated, error: updateErr } = await supabaseAdmin
@@ -2841,6 +2845,16 @@ router.get('/:id/blocks/:blockType', asyncHandler(async (req, res) => {
     case 'control':
       block = generateControlBlock(ticket);
       break;
+    case 'control_a': {
+      const activeItemsA = items.filter(i => !i.pedido_excluded);
+      block = generateControlAB(ticket, activeItemsA, 'A');
+      break;
+    }
+    case 'control_b': {
+      const activeItemsB = items.filter(i => !i.pedido_excluded);
+      block = generateControlAB(ticket, activeItemsB, 'B');
+      break;
+    }
     case 'proforma_cliente':
       block = generateCustomerProformaBlock(ticket, items);
       break;
@@ -2890,7 +2904,7 @@ router.get('/:id/blocks/:blockType', asyncHandler(async (req, res) => {
       return res.status(400).json({ 
         error: 'Invalid block type',
         code: 'INVALID_BLOCK_TYPE',
-        available: ['control', 'proforma_cliente', 'aux_seguimiento', 'reenvios', 'proveedor', 'despachos', 'interno', 'per_supplier', 'auditoria', 'pedido_final', 'pedido_supplier']
+        available: ['control', 'control_a', 'control_b', 'proforma_cliente', 'aux_seguimiento', 'reenvios', 'proveedor', 'despachos', 'interno', 'per_supplier', 'auditoria', 'pedido_final', 'pedido_supplier']
       });
   }
   

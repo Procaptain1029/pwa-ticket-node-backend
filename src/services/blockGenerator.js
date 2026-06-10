@@ -31,6 +31,41 @@ Estado: ${formatStatus(ticket.status)}${ticket.vehicle_info ? `\n🚗 ${formatVe
 }
 
 /**
+ * Generate Control A / Control B block (Punto 18)
+ * Filters items by control_group flag (set in Modo Rápido during proforma elaboration).
+ * Output is a clean copy/paste with only the lines assigned to the requested group.
+ *
+ * Example output for group A:
+ *   🔴 A | K000717 | 0162
+ *
+ *   DAEWOO TACUMA CDX 2000cc (2002)
+ *
+ *   PISTÓN STD
+ *   RIN STD
+ */
+export function generateControlAB(ticket, items, group) {
+  const emoji = group === 'A' ? '🔴' : '🟢';
+  const groupItems = (items || []).filter(i => i.control_group === group);
+
+  const vehicleLine = formatVehicleInfo(ticket.vehicle_info);
+  const vehicleStr = vehicleLine ? vehicleLine.toUpperCase() : '';
+  const groupCode = ticket.group_code || '';
+  const header = `${emoji} ${group} | ${ticket.k_number} | ${groupCode}`;
+
+  if (groupItems.length === 0) {
+    return `${header}\n\n${vehicleStr}\n\n(Sin líneas asignadas al Control ${group})`;
+  }
+
+  const itemLines = groupItems.map(item => {
+    const desc = (item.parsed_description || item.raw_line || '').trim();
+    const qty = (item.quantity || 1) > 1 ? ` x${item.quantity}` : '';
+    return `${desc.toUpperCase()}${qty}`;
+  }).join('\n');
+
+  return `${header}\n\n${vehicleStr}\n\n${itemLines}`;
+}
+
+/**
  * Generate Customer Proforma block
  * Customer-facing, compact WhatsApp-ready layout
  */
@@ -673,6 +708,7 @@ function getStatusEmoji(status) {
 
 export default {
   generateControlBlock,
+  generateControlAB,
   generateCustomerProformaBlock,
   generateAuxSeguimientoBlock,
   generateReenviosBlock,
