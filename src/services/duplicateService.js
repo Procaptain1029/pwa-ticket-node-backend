@@ -299,6 +299,14 @@ export function buildCompareLines(targetItems, sourceItems) {
       target_description: description,
       source_item_id: matched ? sourceItem.id : null,
       source_description: matched ? (sourceItem.parsed_description || sourceItem.raw_line || '') : null,
+      // Extra fields from the matched source line so the seller can validate
+      // price / brand / status / quantity before clicking "Copiar seleccionadas"
+      // without having to open the origin ticket.
+      source_selling_price: matched ? (sourceItem.selling_price ?? null) : null,
+      source_brand: matched ? (sourceItem.brand ?? null) : null,
+      source_status: matched ? (sourceItem.status ?? null) : null,
+      source_validity_status: matched ? (sourceItem.validity_status ?? null) : null,
+      source_quantity: matched ? (sourceItem.quantity ?? null) : null,
       matched,
       score: Math.round(score * 100),
       selected: matched,
