@@ -78,7 +78,7 @@ export function generateCustomerProformaBlock(ticket, items) {
     const alts = item.alternatives || [];
 
     if (item.selling_price) {
-      const priceLine = `🟢 ${desc}${qty} — USD ${formatUSDAmount(item.selling_price)}${brandPart}`;
+      const priceLine = `🟢 ${desc}${qty} — ${formatLinePrice(item.selling_price, item.quantity)}${brandPart}`;
       // Short note on same line, long note below
       if (note && note.length <= 40) {
         itemLines.push(`${priceLine} | ${note}`);
@@ -108,7 +108,7 @@ export function generateCustomerProformaBlock(ticket, items) {
     const note = item.seller_note || '';
 
     if (item.selling_price) {
-      const priceLine = `🟡 ${desc}${qty} — USD ${formatUSDAmount(item.selling_price)}${brandPart} — En verificación`;
+      const priceLine = `🟡 ${desc}${qty} — ${formatLinePrice(item.selling_price, item.quantity)}${brandPart} — En verificación`;
       if (note && note.length <= 40) {
         itemLines.push(`${priceLine} | ${note}`);
       } else {
@@ -116,7 +116,7 @@ export function generateCustomerProformaBlock(ticket, items) {
         if (note) itemLines.push(`   ${note}`);
       }
     } else {
-      itemLines.push(`� ${desc}${qty} — En verificación`);
+      itemLines.push(`🟡 ${desc}${qty} — En verificación`);
     }
 
     // Alternatives
@@ -441,7 +441,7 @@ export function generatePedidoFinalBlock(ticket, items) {
     const desc = normalizeProductName(item.parsed_description || item.raw_line);
     const qty = item.quantity > 1 ? ` x${item.quantity}` : '';
     const brandPart = item.brand ? ` (${item.brand.toUpperCase()})` : '';
-    const price = item.selling_price ? `USD ${formatUSDAmount(item.selling_price)}` : '---';
+    const price = item.selling_price ? formatLinePrice(item.selling_price, item.quantity) : '---';
     const supplierPart = item.supplier_code ? ` | ${item.supplier_code}` : '';
     const codePart = item.codigo_distrimia || item.codigo_oem || '';
     const codeStr = codePart ? ` | Cód: ${codePart}` : '';
@@ -546,6 +546,20 @@ function formatPrice(amount) {
 function formatPriceShort(amount) {
   if (!amount) return 'USD 0';
   return 'USD ' + formatUSDAmount(amount);
+}
+
+/**
+ * Format the price segment for a proforma line.
+ * - quantity <= 1 → "USD 30"
+ * - quantity  > 1 → "USD 30 c/u = USD 60"
+ * Makes it clear to the customer whether the price is unit or total.
+ */
+function formatLinePrice(unitPrice, quantity) {
+  const qty = parseInt(quantity, 10) || 1;
+  const unitStr = `USD ${formatUSDAmount(unitPrice)}`;
+  if (qty <= 1) return unitStr;
+  const total = parseFloat(unitPrice) * qty;
+  return `${unitStr} c/u = USD ${formatUSDAmount(total)}`;
 }
 
 /**
