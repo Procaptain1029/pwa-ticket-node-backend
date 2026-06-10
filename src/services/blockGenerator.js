@@ -135,23 +135,28 @@ export function generateCustomerProformaBlock(ticket, items) {
     }
   }
 
-  // Verification items: 🟡 Producto — En verificación
+  // Verification items: 🟡 Producto — En verificación (or "— Con muestra" if MUESTRA detected)
   for (const item of verificationItems) {
     const desc = normalizeProductName(item.parsed_description || item.raw_line);
     const qty = item.quantity > 1 ? ` x${item.quantity}` : '';
     const brandPart = item.brand ? ` (${item.brand.toUpperCase()})` : '';
     const note = item.seller_note || '';
+    const isMuestra = isMuestraNote(note);
+    const tag = isMuestra ? 'Con muestra' : 'En verificación';
+    // When the only thing the seller wrote is "MUESTRA", don't echo it back in the inline note
+    const cleanedNote = isMuestra ? note.replace(/\bmuestras?\b/gi, '').replace(/\s+·\s+/g, ' · ').replace(/^[\s·]+|[\s·]+$/g, '') : note;
 
     if (item.selling_price) {
-      const priceLine = `🟡 ${desc}${qty} — ${formatLinePrice(item.selling_price, item.quantity)}${brandPart} — En verificación`;
-      if (note && note.length <= 40) {
-        itemLines.push(`${priceLine} | ${note}`);
+      const priceLine = `🟡 ${desc}${qty} — ${formatLinePrice(item.selling_price, item.quantity)}${brandPart} — ${tag}`;
+      if (cleanedNote && cleanedNote.length <= 40) {
+        itemLines.push(`${priceLine} | ${cleanedNote}`);
       } else {
         itemLines.push(priceLine);
-        if (note) itemLines.push(`   ${note}`);
+        if (cleanedNote) itemLines.push(`   ${cleanedNote}`);
       }
     } else {
-      itemLines.push(`🟡 ${desc}${qty} — En verificación`);
+      itemLines.push(`🟡 ${desc}${qty} — ${tag}`);
+      if (cleanedNote) itemLines.push(`   ${cleanedNote}`);
     }
 
     // Alternatives
@@ -701,9 +706,28 @@ function getStatusEmoji(status) {
     'negative': '❌',
     'pending_info': '⏳',
     'no_registra': '🚫',
-    'no_registra_verificar': '🔍'
+    // 🟡 (yellow circle) is used consistently across the proforma and the
+    // Modo Rápido status dot for the "verification" state. Keep this aligned
+    // so any block that emits a status emoji shows the same icon.
+    'no_registra_verificar': '🟡'
   };
   return emojis[status] || '❓';
+}
+
+/**
+ * Detect whether a seller-note tag means "this item is being sent as a sample
+ * for verification". When true, the proforma renders "— Con muestra" instead
+ * of "— En verificación" while keeping the same yellow 🟡 icon.
+ *
+ * Matches the literal word MUESTRA / MUESTRAS in any casing, so the seller
+ * can write things like:
+ *   "MUESTRA"            → 🟡 Bujía STD — Con muestra
+ *   "MUESTRA TBK"        → 🟡 Bujía STD (TBK) — Con muestra
+ *   "100 TBK MUESTRA"    → 🟡 Bujía STD — USD 100 (TBK) — Con muestra
+ */
+function isMuestraNote(note) {
+  if (!note) return false;
+  return /\bmuestras?\b/i.test(note);
 }
 
 export default {
