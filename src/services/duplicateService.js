@@ -15,8 +15,40 @@ const STOP_WORDS = new Set([
   'quiero', 'favor', 'por favor', 'urgente', 'rapido', 'rápido',
 ]);
 
+/**
+ * Equivalent terms collapsed to a single canonical form before comparison.
+ * Each KEY (variant, already accent-stripped and lowercased) maps to a VALUE
+ * (canonical token). Add equivalences as the client identifies them.
+ *
+ *   Example: "Chaquetas de bancada +10" and "Chapa bancada 010" describe
+ *   the same crankshaft bearing — without this map only "bancada" matches
+ *   and the line falls below the duplicate threshold.
+ *
+ * To extend: add `'variant': 'canonical'` entries. Variants must be
+ * single tokens (no spaces); for multi-word equivalences pre-process the
+ * raw text instead.
+ */
+const PART_SYNONYMS = {
+  // Crankshaft / connecting-rod bearings
+  'chaqueta': 'chapa',
+  'chaquetas': 'chapa',
+  'chapas': 'chapa',
+  'chapeta': 'chapa',
+  'chapetas': 'chapa',
+};
+
 function stripAccents(str) {
   return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+/**
+ * Normalize a number token so that measure variants compare equal.
+ * Examples: "+10" → "10", "010" → "10", "020" → "20", "0" → "0".
+ * Years (19xx/20xx) are detected separately and bypass this normalization.
+ */
+function normalizeMeasureNumber(token) {
+  const stripped = token.replace(/^0+/, '');
+  return stripped === '' ? '0' : stripped;
 }
 
 export function normalizeForComparison(text) {
@@ -34,14 +66,16 @@ export function normalizeForComparison(text) {
     .replace(/\s+/g, ' ')
     .trim();
 
-  const words = normalized.split(' ').filter(w => w.length >= 2 && !STOP_WORDS.has(w));
+  const rawWords = normalized.split(' ').filter(w => w.length >= 2 && !STOP_WORDS.has(w));
+  // Canonicalize known synonyms (chaqueta/chapa, etc.) before tokenizing.
+  const words = rawWords.map(w => PART_SYNONYMS[w] || w);
   const yearTokens = [];
   const numberTokens = [];
   const partTokens = [];
 
   for (const w of words) {
     if (/^(19|20)\d{2}$/.test(w)) yearTokens.push(w);
-    else if (/^\d+$/.test(w)) numberTokens.push(w);
+    else if (/^\d+$/.test(w)) numberTokens.push(normalizeMeasureNumber(w));
     else partTokens.push(w);
   }
 
