@@ -290,7 +290,12 @@ function buildTicketFromRuleBased(rawText, groupCode, preprocessed, reason) {
   }));
 
   const expandedItems = splitCompoundItems(items.map(i => ({ ...i, description: i.description })));
-  const itemCount = expandedItems.length;
+  // Intra-batch dedup — same rationale as in enhanceParsedTickets().
+  const { items: dedupedItems, dropped: droppedDuplicates } = dedupeItemsWithinBatch(expandedItems);
+  if (droppedDuplicates > 0) {
+    console.warn(`[PARSER:fallback] intra-batch dedup dropped ${droppedDuplicates} duplicate item(s) from a single paste`);
+  }
+  const itemCount = dedupedItems.length;
 
   const notes = {
     API_ERROR: 'Parser alternativo: error de conexión con OpenAI',
@@ -300,11 +305,16 @@ function buildTicketFromRuleBased(rawText, groupCode, preprocessed, reason) {
     ENHANCE_FAILED: 'Parser alternativo: error al procesar respuesta de IA',
   };
 
+  const baseNote = notes[reason] || 'Parser alternativo usado — revise items generados';
+  const dedupeNote = droppedDuplicates > 0
+    ? `Se eliminaron ${droppedDuplicates} línea${droppedDuplicates > 1 ? 's' : ''} duplicada${droppedDuplicates > 1 ? 's' : ''} (mismo producto repetido en el mensaje)`
+    : null;
+
   return {
     tickets: [{
       raw_text: rawText,
       group_code: groupCode,
-      items: expandedItems.map((item, itemIndex) => ({
+      items: dedupedItems.map((item, itemIndex) => ({
         ...item,
         item_order: itemIndex + 1,
         quantity: item.quantity || 1,
@@ -319,7 +329,7 @@ function buildTicketFromRuleBased(rawText, groupCode, preprocessed, reason) {
       vin: extractVIN(rawText),
     }],
     total_tickets: 1,
-    parse_notes: notes[reason] || 'Parser alternativo usado — revise items generados',
+    parse_notes: [baseNote, dedupeNote].filter(Boolean).join(' | '),
     original_raw_text: rawText,
     parse_method: 'fallback',
   };
@@ -551,12 +561,71 @@ function splitCompoundItems(items) {
 }
 
 /**
+ * Normalize an item description into a comparison key.
+ * Used to detect identical items inside the SAME paste (e.g. when the seller
+ * pastes a WhatsApp message that already contains the same list twice).
+ *
+ * Lower-cases, strips accents and punctuation, collapses whitespace.
+ *   "AMORTIGUADOR DELT" === " amortiguador delt " === "Amortiguador  Delt"
+ */
+function normalizeItemKey(text) {
+  if (!text) return '';
+  return String(text)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Drop duplicate items inside a single parse batch.
+ *
+ * Many real WhatsApp pastes contain the same list twice (table headers, copy
+ * from external systems, reply quoting). Without this pass the system creates
+ * 2× ticket items for every duplicated line.
+ *
+ * The first occurrence wins (keeps its quantity). Subsequent occurrences with
+ * the same normalized description are dropped silently. The number of dropped
+ * lines is returned so the caller can surface a parse_note to the user.
+ */
+export function dedupeItemsWithinBatch(items) {
+  const seen = new Set();
+  const kept = [];
+  let dropped = 0;
+  for (const item of items || []) {
+    const key = normalizeItemKey(item.description || item.parsed_description || item.raw_line);
+    if (!key) {
+      kept.push(item);
+      continue;
+    }
+    if (seen.has(key)) {
+      dropped++;
+      continue;
+    }
+    seen.add(key);
+    kept.push(item);
+  }
+  return { items: kept, dropped };
+}
+
+/**
  * Enhance parsed tickets with additional computed fields
  */
 function enhanceParsedTickets(parsed, groupCode, originalRawText, extractedVehicle = {}) {
+  let totalDroppedDuplicates = 0;
   const tickets = parsed.tickets.map((ticket) => {
     const expandedItems = splitCompoundItems(ticket.items || []);
-    const itemCount = expandedItems.length || 0;
+    // Intra-batch dedup: when the source paste contains the same line twice
+    // (very common with WhatsApp tables being pasted twice) we keep only the
+    // first occurrence so the seller doesn't get duplicated ticket items.
+    const { items: dedupedItems, dropped } = dedupeItemsWithinBatch(expandedItems);
+    totalDroppedDuplicates += dropped;
+    if (dropped > 0) {
+      console.warn(`[PARSER] intra-batch dedup dropped ${dropped} duplicate item(s) from a single paste`);
+    }
+    const itemCount = dedupedItems.length || 0;
 
     let vehicleForNorm = ticket.vehicle_info ? { ...ticket.vehicle_info } : {};
     vehicleForNorm = mergeVehicleInfo(vehicleForNorm, extractedVehicle);
@@ -572,7 +641,7 @@ function enhanceParsedTickets(parsed, groupCode, originalRawText, extractedVehic
     const priority = validPriorities.includes(ticket.priority) ? ticket.priority : 'normal';
 
     const confidence = typeof ticket.confidence === 'number' ? ticket.confidence : 1;
-    const needsReview = confidence < 0.7 || !expandedItems.length;
+    const needsReview = confidence < 0.7 || !dedupedItems.length;
 
     return {
       ...ticket,
@@ -583,7 +652,7 @@ function enhanceParsedTickets(parsed, groupCode, originalRawText, extractedVehic
       status: needsReview ? 'pending_review' : 'in_progress',
       possible_grouping: ticket.possible_grouping || false,
       vehicle_info: normalizedVehicle,
-      items: expandedItems.map((item, itemIndex) => ({
+      items: dedupedItems.map((item, itemIndex) => ({
         ...item,
         item_order: itemIndex + 1,
         quantity: item.quantity || 1,
@@ -592,10 +661,15 @@ function enhanceParsedTickets(parsed, groupCode, originalRawText, extractedVehic
     };
   });
 
+  const dedupeNote = totalDroppedDuplicates > 0
+    ? `Se eliminaron ${totalDroppedDuplicates} línea${totalDroppedDuplicates > 1 ? 's' : ''} duplicada${totalDroppedDuplicates > 1 ? 's' : ''} (mismo producto repetido en el mensaje)`
+    : null;
+  const combinedNotes = [parsed.parse_notes, dedupeNote].filter(Boolean).join(' | ');
+
   return {
     tickets,
     total_tickets: tickets.length,
-    parse_notes: parsed.parse_notes,
+    parse_notes: combinedNotes || null,
     original_raw_text: originalRawText,
   };
 }

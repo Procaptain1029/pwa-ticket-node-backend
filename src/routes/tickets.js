@@ -1282,19 +1282,46 @@ router.post('/generate',
         if (ticketError) throw ticketError;
         
         if (ticketData.items && ticketData.items.length > 0) {
-          const itemsToInsert = ticketData.items.map(item => ({
+          // Defense-in-depth intra-batch dedup. The parser already strips
+          // duplicates inside enhanceParsedTickets / buildTicketFromRuleBased,
+          // but we re-check here so any future code path that constructs
+          // ticketData (PUTIX import, manual entry, etc.) cannot bypass it.
+          const normalize = (s) => String(s || '').toLowerCase().normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\s]/g, ' ')
+            .replace(/\s+/g, ' ').trim();
+          const seenDescriptions = new Set();
+          const uniqueItems = [];
+          for (const it of ticketData.items) {
+            const key = normalize(it.description || it.raw_line);
+            if (key && seenDescriptions.has(key)) continue;
+            if (key) seenDescriptions.add(key);
+            uniqueItems.push(it);
+          }
+          if (uniqueItems.length !== ticketData.items.length) {
+            console.warn(`[GENERATE] Route dedup removed ${ticketData.items.length - uniqueItems.length} duplicate item(s) before insert for new ticket`);
+          }
+
+          const itemsToInsert = uniqueItems.map((item, idx) => ({
             ticket_id: ticket.id,
-            item_order: item.item_order,
+            item_order: idx + 1,
             raw_line: item.raw_line,
             parsed_description: item.description,
             quantity: item.quantity || 1,
             status: item.status || 'pending_info'
           }));
-          
+
           const { error: itemsError } = await supabaseAdmin
             .from('ticket_items')
             .insert(itemsToInsert);
           if (itemsError) throw itemsError;
+
+          // Keep the ticket's item_count in sync with what we actually inserted.
+          if (itemsToInsert.length !== ticketData.item_count) {
+            await supabaseAdmin
+              .from('tickets')
+              .update({ item_count: itemsToInsert.length })
+              .eq('id', ticket.id);
+          }
         }
         
         if (ticketDuplicates.length > 0) {
