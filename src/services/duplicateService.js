@@ -501,19 +501,50 @@ export async function compareCoincidences(ticketId, sourceId) {
   };
 }
 
+/**
+ * Tokenize a free-text string into searchable words.
+ * Lower-cases, strips accents, splits on any non-alphanumeric.
+ * Examples:
+ *   "KIA RIO 1.4"         → ["kia", "rio", "1", "4"]
+ *   "K000867"             → ["k000867"]
+ *   "Hyundai-Elantra"     → ["hyundai", "elantra"]
+ */
+function tokenizeForSearch(text) {
+  if (!text) return [];
+  return stripAccents(String(text).toLowerCase())
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+/**
+ * Reference search. Restricted to identification fields of the ticket so
+ * that searching "RIO" does NOT match unrelated tickets where the substring
+ * appears inside common words of the WhatsApp body (BARRIO, PRIORIDAD,
+ * PROPIETARIO, etc.).
+ *
+ * Matches by WORD (not substring), so "RIO" matches "KIA RIO" but not
+ * "BARRIO". Multi-word queries are AND-combined: "kia rio" requires both
+ * "kia" and "rio" to appear as separate words.
+ *
+ * Fields considered: vehicle marca, modelo, placa, chasis, and the ticket
+ * k_number. Raw WhatsApp text and customer names are intentionally excluded.
+ */
 export async function searchReferences(ticketId, query) {
   const target = await loadTicketWithItems(ticketId);
   if (!target) return null;
 
-  const q = query.trim();
+  const q = (query || '').trim();
   if (!q) return { query: q, count: 0, results: [] };
+
+  const queryTokens = tokenizeForSearch(q);
+  if (queryTokens.length === 0) return { query: q, count: 0, results: [] };
 
   const ninetyDaysAgo = new Date();
   ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
 
   const { data: tickets, error } = await supabaseAdmin
     .from('tickets')
-    .select('id, k_number, group_code, raw_text, status, created_at, vehicle_info')
+    .select('id, k_number, group_code, status, created_at, vehicle_info')
     .neq('id', ticketId)
     .eq('is_merged', false)
     .gte('created_at', ninetyDaysAgo.toISOString())
@@ -522,16 +553,17 @@ export async function searchReferences(ticketId, query) {
 
   if (error) throw error;
 
-  const qUpper = stripAccents(q.toUpperCase());
   const filtered = (tickets || []).filter(t => {
-    const blob = [
-      t.raw_text,
-      t.k_number,
-      t.vehicle_info?.marca,
-      t.vehicle_info?.modelo,
-      t.vehicle_info?.placa,
-    ].filter(Boolean).join(' ');
-    return stripAccents(blob.toUpperCase()).includes(qUpper);
+    const fieldTokens = new Set([
+      ...tokenizeForSearch(t.k_number),
+      ...tokenizeForSearch(t.vehicle_info?.marca),
+      ...tokenizeForSearch(t.vehicle_info?.modelo),
+      ...tokenizeForSearch(t.vehicle_info?.placa),
+      ...tokenizeForSearch(t.vehicle_info?.chasis),
+    ]);
+    // AND across query tokens: every search word must appear as a full
+    // word in at least one of the vehicle/identification fields.
+    return queryTokens.every(qt => fieldTokens.has(qt));
   }).slice(0, 50);
 
   const candidateIds = filtered.map(t => t.id);
