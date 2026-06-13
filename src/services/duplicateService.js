@@ -517,17 +517,34 @@ function tokenizeForSearch(text) {
 }
 
 /**
- * Reference search. Restricted to identification fields of the ticket so
- * that searching "RIO" does NOT match unrelated tickets where the substring
- * appears inside common words of the WhatsApp body (BARRIO, PRIORIDAD,
- * PROPIETARIO, etc.).
+ * Reference search.
  *
- * Matches by WORD (not substring), so "RIO" matches "KIA RIO" but not
- * "BARRIO". Multi-word queries are AND-combined: "kia rio" requires both
- * "kia" and "rio" to appear as separate words.
+ * Searched fields (all vehicle identification + the ticket k_number):
+ *   - k_number
+ *   - vehicle_info.marca, modelo, anio, cilindraje
+ *   - vehicle_info.placa, chasis, motor, serie
+ *   - top-level ticket.vin
  *
- * Fields considered: vehicle marca, modelo, placa, chasis, and the ticket
- * k_number. Raw WhatsApp text and customer names are intentionally excluded.
+ * Raw WhatsApp text, customer names and item descriptions are intentionally
+ * excluded — searching "RIO" must NOT match tickets where the substring
+ * appears in common words of the body (BARRIO, PRIORIDAD, PROPIETARIO).
+ *
+ * Two matching strategies are combined per query token:
+ *
+ *   1. WORD match (preferred): the token must equal a full word in one of
+ *      the fields above. So "RIO" matches "KIA RIO" but not "BARRIO".
+ *
+ *   2. SERIAL substring match (for tokens of length ≥ 3): the token may
+ *      appear anywhere inside a "serial-style" identifier field
+ *      (motor, chasis, vin, placa, serie, k_number, group_code). This
+ *      lets sellers search by partial engine/chassis codes:
+ *        "HR16"        → matches motor "HR16842380M"
+ *        "PDX"         → matches placa "PDX1148"
+ *        "KLPGBB1A6"   → matches chasis "KLPGBB1A6JE048256"
+ *
+ * Multi-word queries are AND-combined: every query token must match by
+ * one of the two strategies. So "versa hr16" requires both "versa" and
+ * "hr16" to be found (in any field, by either word or serial-substring).
  */
 export async function searchReferences(ticketId, query) {
   const target = await loadTicketWithItems(ticketId);
@@ -544,7 +561,7 @@ export async function searchReferences(ticketId, query) {
 
   const { data: tickets, error } = await supabaseAdmin
     .from('tickets')
-    .select('id, k_number, group_code, status, created_at, vehicle_info')
+    .select('id, k_number, group_code, status, created_at, vehicle_info, vin')
     .neq('id', ticketId)
     .eq('is_merged', false)
     .gte('created_at', ninetyDaysAgo.toISOString())
@@ -554,16 +571,45 @@ export async function searchReferences(ticketId, query) {
   if (error) throw error;
 
   const filtered = (tickets || []).filter(t => {
-    const fieldTokens = new Set([
+    const vi = t.vehicle_info || {};
+
+    // Whole-word tokens from every identification field (descriptive
+    // fields like marca/modelo/anio + serial fields like motor/chasis).
+    // Lets exact-word queries like "VERSA" or "HR16842380M" match
+    // immediately when typed in full.
+    const wordTokens = new Set([
       ...tokenizeForSearch(t.k_number),
-      ...tokenizeForSearch(t.vehicle_info?.marca),
-      ...tokenizeForSearch(t.vehicle_info?.modelo),
-      ...tokenizeForSearch(t.vehicle_info?.placa),
-      ...tokenizeForSearch(t.vehicle_info?.chasis),
+      ...tokenizeForSearch(t.group_code),
+      ...tokenizeForSearch(vi.marca),
+      ...tokenizeForSearch(vi.modelo),
+      ...tokenizeForSearch(vi.anio),
+      ...tokenizeForSearch(vi.cilindraje),
+      ...tokenizeForSearch(vi.placa),
+      ...tokenizeForSearch(vi.chasis),
+      ...tokenizeForSearch(vi.motor),
+      ...tokenizeForSearch(vi.serie),
+      ...tokenizeForSearch(t.vin),
     ]);
-    // AND across query tokens: every search word must appear as a full
-    // word in at least one of the vehicle/identification fields.
-    return queryTokens.every(qt => fieldTokens.has(qt));
+
+    // Concatenated, lowercased, accent-stripped blob of ONLY the long
+    // alphanumeric identifier fields. Used for partial / prefix matching
+    // (e.g. "HR16" inside "HR16842380M") without re-introducing the
+    // false positives we'd get from substring-matching the WhatsApp body.
+    const serialBlob = stripAccents(
+      [t.k_number, t.group_code, vi.placa, vi.chasis, vi.motor, vi.serie, t.vin]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+    );
+
+    // Each query token must match SOMEWHERE: as a whole word in any
+    // identification field, or (for tokens of length ≥ 3, to avoid
+    // noisy 1–2 char matches) as a substring of the serial blob.
+    return queryTokens.every(qt => {
+      if (wordTokens.has(qt)) return true;
+      if (qt.length >= 3 && serialBlob.includes(qt)) return true;
+      return false;
+    });
   }).slice(0, 50);
 
   const candidateIds = filtered.map(t => t.id);
