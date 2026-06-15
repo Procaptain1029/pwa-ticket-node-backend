@@ -517,15 +517,44 @@ export function generatePedidoFinalBlock(ticket, items) {
 }
 
 /**
- * Generate per-supplier Pedido blocks for logistics (retiro, despacho, compras)
- * Groups confirmed items by supplier_code
+ * Generate per-supplier Pedido blocks (supplier-facing copy/paste).
+ *
+ * Format requested by the client:
+ *   - One line per confirmed item, format: "DESCRIPCIÓN (QTY)"
+ *   - No numbering, no brand, no internal codes, no seller notes
+ *     (supplier quotes by description and uses their own catalog).
+ *   - Alternatives are NOT included — only the confirmed line per item.
+ *     This is naturally enforced because we only iterate over `items`,
+ *     never `item.alternatives`.
+ *   - Subtotal (price) is intentionally OMITTED — that's internal info,
+ *     never sent to suppliers.
+ *   - Total article count is KEPT so the supplier can validate the
+ *     order arrived complete.
+ *   - Closing courtesy line at the bottom.
+ *
+ * Example output:
+ *   📦 PEDIDO — JCC
+ *   #K000524
+ *   🚗 CHEVROLET ONIX LTZ TURBO AC 1.0 4P 4X2 TM (2022)
+ *
+ *   BUJÍAS (4)
+ *   TEMPLADOR CADENA (2)
+ *   BOMBA DE AGUA (1)
+ *
+ *   📦 3 artículos
+ *
+ *   🤝 Favor ayudarnos con la revisión y despacho de los artículos solicitados. Gracias.
+ *
+ * The `total` field is still returned in the API response (for internal
+ * use by the frontend if it ever wants a per-supplier price summary)
+ * but is not surfaced in the supplier-facing text.
  */
 export function generatePedidoSupplierBlocks(ticket, items) {
   const vi = ticket.vehicle_info || {};
   const vehicleParts = [vi.marca, vi.modelo, shouldAppendCilindraje(vi.modelo, vi.cilindraje) ? vi.cilindraje : null, vi.anio ? `(${vi.anio})` : null]
     .filter(Boolean).join(' ');
 
-  // Only confirmed positive items
+  // Only confirmed positive items (no excluded, no negatives, no pending)
   const confirmedItems = items.filter(i => !i.pedido_excluded && i.status === 'positive');
 
   // Group by supplier
@@ -539,30 +568,35 @@ export function generatePedidoSupplierBlocks(ticket, items) {
   const suppliers = Object.keys(supplierGroups);
   if (suppliers.length === 0) return [];
 
+  const SUPPLIER_CLOSING = '🤝 Favor ayudarnos con la revisión y despacho de los artículos solicitados. Gracias.';
+
   return suppliers.map(supplier => {
     const sItems = supplierGroups[supplier];
-    const itemLines = sItems.map((item, idx) => {
-      const desc = normalizeProductName(item.parsed_description || item.raw_line);
-      const qty = item.quantity > 1 ? ` x${item.quantity}` : '';
-      const code = item.codigo_distrimia || item.codigo_oem || '---';
-      const brandPart = item.brand ? ` (${item.brand.toUpperCase()})` : '';
-      const note = item.seller_note ? ` | ${item.seller_note}` : '';
-      return `${idx + 1}. ${desc}${qty}${brandPart} | Cód: ${code}${note}`;
+
+    const itemLines = sItems.map(item => {
+      const desc = normalizeProductName(item.parsed_description || item.raw_line).toUpperCase();
+      const qty = item.quantity || 1;
+      return `${desc} (${qty})`;
     });
 
+    // Subtotal kept in API response (unused by UI today, but available)
+    // — intentionally NOT rendered into the supplier-facing text.
     const groupTotal = sItems.reduce((sum, i) =>
       sum + (parseFloat(i.selling_price || 0) * (i.quantity || 1)), 0
     );
 
+    const articulosLabel = `📦 ${sItems.length} artículo${sItems.length === 1 ? '' : 's'}`;
+
     const content = [
       `📦 PEDIDO — ${supplier.toUpperCase()}`,
-      `#${ticket.k_number} | IT: ${sItems.length}`,
-      vehicleParts ? `🚗 ${vehicleParts}` : null,
+      `#${ticket.k_number}`,
+      vehicleParts ? `🚗 ${vehicleParts.toUpperCase()}` : null,
       '',
       itemLines.join('\n'),
       '',
-      `💰 Subtotal: USD ${formatUSDAmount(groupTotal)}`,
-      `📦 ${sItems.length} artículo(s)`,
+      articulosLabel,
+      '',
+      SUPPLIER_CLOSING,
     ].filter(s => s !== null).join('\n');
 
     return {
