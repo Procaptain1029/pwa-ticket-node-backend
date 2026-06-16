@@ -8,6 +8,58 @@ const LEYENDA_1 = '⚠️ Precios sujetos a cambio sin previo aviso';
 const LEYENDA_2 = '📋 Disponibilidad sujeta a confirmación al momento del pedido';
 
 /**
+ * Phase 2 — resolve the effective brand + selling_price of an item
+ * based on its alternative-confirmation state.
+ *
+ * Returns:
+ *   - brand / selling_price: the confirmed alternative's values if a valid
+ *     confirmed_alternative_id is present, otherwise the primary's.
+ *   - isConfirmedAlternative: true when an alternative was used.
+ *   - confirmedAltId: id of the alternative that was used (null otherwise).
+ *
+ * All downstream blocks (customer Proforma, Pedido Final, Pedido por
+ * Proveedor, Interno, per-supplier, etc.) call this helper so the
+ * seller's single click in Modo Rápido / Pedido Final propagates
+ * consistently without rewriting any quote text.
+ */
+function resolveConfirmedItem(item) {
+  if (item && item.confirmed_alternative_id && Array.isArray(item.alternatives)) {
+    const alt = item.alternatives.find(a => a.id === item.confirmed_alternative_id);
+    if (alt) {
+      return {
+        brand: alt.brand || null,
+        selling_price: alt.selling_price ?? null,
+        isConfirmedAlternative: true,
+        confirmedAltId: alt.id,
+      };
+    }
+  }
+  return {
+    brand: (item && item.brand) || null,
+    selling_price: (item && item.selling_price) ?? null,
+    isConfirmedAlternative: false,
+    confirmedAltId: null,
+  };
+}
+
+/**
+ * Phase 2 — when a confirmation exists, downstream blocks must not also
+ * leak the OTHER alternatives into the output. This helper returns the
+ * alternatives that should be rendered as "additional options" in the
+ * customer Proforma:
+ *   - confirmed → no extra options (customer already chose)
+ *   - not confirmed → all alternatives (current behaviour)
+ *
+ * Used only by the customer-facing Proforma. Internal and supplier
+ * blocks never render alternatives.
+ */
+function visibleAlternatives(item) {
+  if (!item || !Array.isArray(item.alternatives)) return [];
+  if (item.confirmed_alternative_id) return [];
+  return item.alternatives;
+}
+
+/**
  * Generate Control block (internal)
  * Contains: #K + IT + priority
  */
@@ -108,12 +160,16 @@ export function generateCustomerProformaBlock(ticket, items) {
   for (const item of availableItems) {
     const desc = normalizeProductName(item.parsed_description || item.raw_line);
     const qty = item.quantity > 1 ? ` x${item.quantity}` : '';
-    const brandPart = item.brand ? ` (${item.brand.toUpperCase()})` : '';
+    // Phase 2 — use confirmed alternative when set, otherwise primary.
+    const resolved = resolveConfirmedItem(item);
+    const brandPart = resolved.brand ? ` (${resolved.brand.toUpperCase()})` : '';
     const note = item.seller_note || '';
-    const alts = item.alternatives || [];
+    // When confirmed, the other alternatives are hidden so the customer
+    // sees only the option they actually chose.
+    const alts = visibleAlternatives(item);
 
-    if (item.selling_price) {
-      const priceLine = `🟢 ${desc}${qty} — ${formatLinePrice(item.selling_price, item.quantity)}${brandPart}`;
+    if (resolved.selling_price) {
+      const priceLine = `🟢 ${desc}${qty} — ${formatLinePrice(resolved.selling_price, item.quantity)}${brandPart}`;
       // Short note on same line, long note below
       if (note && note.length <= 40) {
         itemLines.push(`${priceLine} | ${note}`);
@@ -125,7 +181,7 @@ export function generateCustomerProformaBlock(ticket, items) {
       itemLines.push(`🟢 ${desc}${qty} — Disponible${brandPart}`);
     }
 
-    // Alternatives on separate lines
+    // Alternatives on separate lines (only when not yet confirmed)
     if (alts.length > 0) {
       for (const alt of alts) {
         const altPrice = alt.selling_price ? `USD ${formatUSDAmount(alt.selling_price)}` : '';
@@ -139,15 +195,17 @@ export function generateCustomerProformaBlock(ticket, items) {
   for (const item of verificationItems) {
     const desc = normalizeProductName(item.parsed_description || item.raw_line);
     const qty = item.quantity > 1 ? ` x${item.quantity}` : '';
-    const brandPart = item.brand ? ` (${item.brand.toUpperCase()})` : '';
+    // Phase 2 — use confirmed alternative when set, otherwise primary.
+    const resolved = resolveConfirmedItem(item);
+    const brandPart = resolved.brand ? ` (${resolved.brand.toUpperCase()})` : '';
     const note = item.seller_note || '';
     const isMuestra = isMuestraNote(note);
     const tag = isMuestra ? 'Con muestra' : 'En verificación';
     // When the only thing the seller wrote is "MUESTRA", don't echo it back in the inline note
     const cleanedNote = isMuestra ? note.replace(/\bmuestras?\b/gi, '').replace(/\s+·\s+/g, ' · ').replace(/^[\s·]+|[\s·]+$/g, '') : note;
 
-    if (item.selling_price) {
-      const priceLine = `🟡 ${desc}${qty} — ${formatLinePrice(item.selling_price, item.quantity)}${brandPart} — ${tag}`;
+    if (resolved.selling_price) {
+      const priceLine = `🟡 ${desc}${qty} — ${formatLinePrice(resolved.selling_price, item.quantity)}${brandPart} — ${tag}`;
       if (cleanedNote && cleanedNote.length <= 40) {
         itemLines.push(`${priceLine} | ${cleanedNote}`);
       } else {
@@ -159,8 +217,8 @@ export function generateCustomerProformaBlock(ticket, items) {
       if (cleanedNote) itemLines.push(`   ${cleanedNote}`);
     }
 
-    // Alternatives
-    const alts = item.alternatives || [];
+    // Alternatives (only when not yet confirmed)
+    const alts = visibleAlternatives(item);
     if (alts.length > 0) {
       for (const alt of alts) {
         const altPrice = alt.selling_price ? `USD ${formatUSDAmount(alt.selling_price)}` : '';
@@ -188,10 +246,10 @@ export function generateCustomerProformaBlock(ticket, items) {
   }
 
 
-  // Total only from positive items with price
-  const positiveWithPrice = items.filter(i => i.status === 'positive' && i.selling_price);
-  const total = positiveWithPrice.reduce((sum, item) => 
-    sum + (parseFloat(item.selling_price) * (item.quantity || 1)), 0
+  // Total only from positive items with price (use confirmed alt price when applicable)
+  const positiveWithPrice = items.filter(i => i.status === 'positive' && resolveConfirmedItem(i).selling_price);
+  const total = positiveWithPrice.reduce((sum, item) =>
+    sum + (parseFloat(resolveConfirmedItem(item).selling_price) * (item.quantity || 1)), 0
   );
 
   // Build output sections
@@ -346,8 +404,11 @@ export function generateInternoBlock(ticket, items) {
   const vehicleLine = formatVehicleInfo(ticket.vehicle_info);
 
   const itemLines = items.map((item, idx) => {
+    // Phase 2 — internal block also honours the confirmed alternative
+    // price so the margin reflects what is actually being sold.
+    const resolved = resolveConfirmedItem(item);
     const cost = item.cost_price ? formatPrice(item.cost_price) : '---';
-    const sell = item.selling_price ? formatPrice(item.selling_price) : '---';
+    const sell = resolved.selling_price ? formatPrice(resolved.selling_price) : '---';
     const internalNote = item.internal_note ? `\n   📝 Nota interna: ${item.internal_note}` : '';
     return `${idx + 1}. ${item.parsed_description || item.raw_line}
    Costo: ${cost} | Venta: ${sell}
@@ -357,12 +418,13 @@ export function generateInternoBlock(ticket, items) {
    Código Fábrica: ${item.codigo_fabrica || '---'}${internalNote}`;
   }).join('\n\n');
 
-  const totalCost = items.reduce((sum, i) => 
+  const totalCost = items.reduce((sum, i) =>
     sum + (parseFloat(i.cost_price || 0) * (i.quantity || 1)), 0
   );
-  const totalSell = items.reduce((sum, i) => 
-    sum + (parseFloat(i.selling_price || 0) * (i.quantity || 1)), 0
-  );
+  const totalSell = items.reduce((sum, i) => {
+    const resolved = resolveConfirmedItem(i);
+    return sum + (parseFloat(resolved.selling_price || 0) * (i.quantity || 1));
+  }, 0);
 
   return `╔════════════════════════════════╗
 ║       CONTROL INTERNO          ║
@@ -401,8 +463,10 @@ export function generatePerSupplierBlocks(ticket, items) {
   return suppliers.map(supplier => {
     const sItems = supplierGroups[supplier];
     const itemLines = sItems.map((item, idx) => {
+      // Phase 2 — use confirmed alternative's selling price when set.
+      const resolved = resolveConfirmedItem(item);
       const cost = item.cost_price ? formatPrice(item.cost_price) : '---';
-      const sell = item.selling_price ? formatPrice(item.selling_price) : '---';
+      const sell = resolved.selling_price ? formatPrice(resolved.selling_price) : '---';
       const internalNote = item.internal_note ? `\n   📝 ${item.internal_note}` : '';
       return `${idx + 1}. ${item.parsed_description || item.raw_line}
    Costo: ${cost} | Venta: ${sell}
@@ -412,7 +476,10 @@ export function generatePerSupplierBlocks(ticket, items) {
     }).join('\n\n');
 
     const groupCost = sItems.reduce((sum, i) => sum + (parseFloat(i.cost_price || 0) * (i.quantity || 1)), 0);
-    const groupSell = sItems.reduce((sum, i) => sum + (parseFloat(i.selling_price || 0) * (i.quantity || 1)), 0);
+    const groupSell = sItems.reduce((sum, i) => {
+      const resolved = resolveConfirmedItem(i);
+      return sum + (parseFloat(resolved.selling_price || 0) * (i.quantity || 1));
+    }, 0);
 
     return {
       supplier,
@@ -480,8 +547,10 @@ export function generatePedidoFinalBlock(ticket, items) {
   const itemLines = confirmedItems.map((item, idx) => {
     const desc = normalizeProductName(item.parsed_description || item.raw_line);
     const qty = item.quantity > 1 ? ` x${item.quantity}` : '';
-    const brandPart = item.brand ? ` (${item.brand.toUpperCase()})` : '';
-    const price = item.selling_price ? formatLinePrice(item.selling_price, item.quantity) : '---';
+    // Phase 2 — confirmed alternative (if any) overrides primary brand/price.
+    const resolved = resolveConfirmedItem(item);
+    const brandPart = resolved.brand ? ` (${resolved.brand.toUpperCase()})` : '';
+    const price = resolved.selling_price ? formatLinePrice(resolved.selling_price, item.quantity) : '---';
     const supplierPart = item.supplier_code ? ` | ${item.supplier_code}` : '';
     const codePart = item.codigo_distrimia || item.codigo_oem || '';
     const codeStr = codePart ? ` | Cód: ${codePart}` : '';
@@ -489,9 +558,10 @@ export function generatePedidoFinalBlock(ticket, items) {
     return `${idx + 1}. ${desc}${qty} — ${price}${brandPart}${supplierPart}${codeStr}${note}`;
   });
 
-  const total = confirmedItems.reduce((sum, i) =>
-    sum + (parseFloat(i.selling_price || 0) * (i.quantity || 1)), 0
-  );
+  const total = confirmedItems.reduce((sum, i) => {
+    const resolved = resolveConfirmedItem(i);
+    return sum + (parseFloat(resolved.selling_price || 0) * (i.quantity || 1));
+  }, 0);
 
   const sections = [];
   sections.push('✅ PEDIDO FINAL – DISTRIMIA S.A.');
@@ -580,10 +650,12 @@ export function generatePedidoSupplierBlocks(ticket, items) {
     });
 
     // Subtotal kept in API response (unused by UI today, but available)
-    // — intentionally NOT rendered into the supplier-facing text.
-    const groupTotal = sItems.reduce((sum, i) =>
-      sum + (parseFloat(i.selling_price || 0) * (i.quantity || 1)), 0
-    );
+    // — intentionally NOT rendered into the supplier-facing text. Uses
+    // the confirmed-alternative price when set (Phase 2).
+    const groupTotal = sItems.reduce((sum, i) => {
+      const resolved = resolveConfirmedItem(i);
+      return sum + (parseFloat(resolved.selling_price || 0) * (i.quantity || 1));
+    }, 0);
 
     const articulosLabel = `📦 ${sItems.length} artículo${sItems.length === 1 ? '' : 's'}`;
 

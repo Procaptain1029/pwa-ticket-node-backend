@@ -140,7 +140,12 @@ const updateItemSchema = z.object({
   internal_note: z.string().optional().nullable(),
   pedido_excluded: z.boolean().optional(),
   quantity: z.number().int().min(1).optional(),
-  control_group: z.enum(['A', 'B']).optional().nullable()
+  control_group: z.enum(['A', 'B']).optional().nullable(),
+  // Phase 2 — alternative confirmation. Either may be sent independently
+  // but the canonical write path always sets both atomically (see route
+  // handler) to keep the boolean and the FK in sync.
+  confirmed_alternative_id: z.string().uuid().optional().nullable(),
+  alternative_confirmed: z.boolean().optional(),
 });
 
 // Multer config for file uploads (images + audio)
@@ -2141,6 +2146,12 @@ const bulkQuoteAlternativeSchema = z.object({
 
 const bulkQuoteItemSchema = z.object({
   id: z.string().uuid(),
+  // Phase 2 — explicit confirmation of a quote alternative. Sent together
+  // by the Modo Rápido / Pedido Final selectors. NULL id + true boolean
+  // means "primary explicitly confirmed". See add_confirmed_alternative.sql
+  // for full semantics.
+  confirmed_alternative_id: z.string().uuid().optional().nullable(),
+  alternative_confirmed: z.boolean().optional(),
   selling_price: z.number().positive().optional().nullable(),
   cost_price: z.number().positive().optional().nullable(),
   brand: z.string().optional().nullable(),
@@ -2203,6 +2214,25 @@ router.put('/:ticketId/items/bulk-quote',
       if (itemData.supplier_code !== undefined) updatePayload.supplier_code = itemData.supplier_code;
       if (itemData.codigo_distrimia !== undefined) updatePayload.codigo_distrimia = itemData.codigo_distrimia;
       if (itemData.control_group !== undefined) updatePayload.control_group = itemData.control_group;
+
+      // Phase 2 — alternative confirmation handling.
+      // If the seller is REPLACING the alternative set in this same save,
+      // we force a reset of the confirmation (the old confirmed alt may
+      // be about to vanish; the seller has to re-confirm against the new
+      // option set). This also matches the FK's ON DELETE SET NULL.
+      // Otherwise, honour whatever confirmation fields the client sent.
+      if (itemData.alternatives !== undefined) {
+        updatePayload.alternative_confirmed = false;
+        updatePayload.confirmed_alternative_id = null;
+      } else {
+        if (itemData.alternative_confirmed !== undefined) {
+          updatePayload.alternative_confirmed = itemData.alternative_confirmed;
+        }
+        if (itemData.confirmed_alternative_id !== undefined) {
+          updatePayload.confirmed_alternative_id = itemData.confirmed_alternative_id;
+        }
+      }
+
       updatePayload.updated_at = new Date().toISOString();
 
       const { data: updated, error: updateErr } = await supabaseAdmin
@@ -2214,19 +2244,27 @@ router.put('/:ticketId/items/bulk-quote',
         .single();
 
       if (!updateErr && updated) {
-        // Handle alternatives - delete existing and create new ones
-        if (itemData.alternatives && itemData.alternatives.length > 0) {
-          // Delete existing alternatives
-          await supabaseAdmin
-            .from('item_alternatives')
+        // Handle alternatives - replace existing set with the new one.
+        // IMPORTANT: the canonical table is `ticket_item_alternatives` with
+        // FK column `ticket_item_id`. A previous version of this handler
+        // wrote to a non-existent / mismatched `item_alternatives` table
+        // with column `item_id`, which silently dropped every alternative
+        // entered through Modo Rápido ("$55 KOREA / $65 KOREA METAL").
+        // Always run the delete (even when the new array is empty) so the
+        // seller can also REMOVE alternatives by re-saving a single quote.
+        if (itemData.alternatives !== undefined) {
+          const { error: delErr } = await supabaseAdmin
+            .from('ticket_item_alternatives')
             .delete()
-            .eq('item_id', itemData.id);
+            .eq('ticket_item_id', itemData.id);
+          if (delErr) {
+            console.error(`[BULK-QUOTE] Failed to clear alternatives for item ${itemData.id}:`, delErr.message);
+          }
 
-          // Create new alternatives
-          const alternativesToInsert = itemData.alternatives
+          const alternativesToInsert = (itemData.alternatives || [])
             .filter(alt => alt.brand && alt.selling_price)
             .map(alt => ({
-              item_id: itemData.id,
+              ticket_item_id: itemData.id,
               brand: alt.brand,
               selling_price: alt.selling_price,
               notes: alt.note || null,
@@ -2234,9 +2272,12 @@ router.put('/:ticketId/items/bulk-quote',
             }));
 
           if (alternativesToInsert.length > 0) {
-            await supabaseAdmin
-              .from('item_alternatives')
+            const { error: insErr } = await supabaseAdmin
+              .from('ticket_item_alternatives')
               .insert(alternativesToInsert);
+            if (insErr) {
+              console.error(`[BULK-QUOTE] Failed to insert alternatives for item ${itemData.id}:`, insErr.message);
+            }
           }
         }
 
