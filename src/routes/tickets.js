@@ -2855,6 +2855,78 @@ router.get('/:id/attachments', asyncHandler(async (req, res) => {
 }));
 
 /**
+ * PUT /api/tickets/:id/block-notes
+ *
+ * Punto 19 — per-block observations.
+ *
+ * Upsert (or clear) the optional free-text note attached to a single
+ * copy/paste block. Each block type can carry an independent note that
+ * its generator appends at the very end of its output. Sending an
+ * empty / null `note` removes the key.
+ *
+ * Body: { block_type: BlockNoteKey, note: string|null }
+ * Allowed keys: proforma_cliente | control_a | control_b
+ *               | pedido_supplier | pedido_final
+ *
+ * No lock check: this is a copy/paste annotation, not item data, so
+ * sellers can adjust it at any time (including in `pedido` status).
+ */
+const BLOCK_NOTE_KEYS = ['proforma_cliente', 'control_a', 'control_b', 'pedido_supplier', 'pedido_final'];
+const blockNoteSchema = z.object({
+  block_type: z.enum(BLOCK_NOTE_KEYS),
+  note: z.string().max(500).optional().nullable(),
+});
+
+router.put('/:id/block-notes',
+  authorize(['seller', 'dispatcher', 'admin']),
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { block_type, note } = blockNoteSchema.parse(req.body);
+    const userId = req.user.id;
+
+    const { data: ticket, error: fetchErr } = await supabaseAdmin
+      .from('tickets')
+      .select('id, block_notes')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !ticket) {
+      return res.status(404).json({ error: 'Ticket not found', code: 'NOT_FOUND' });
+    }
+
+    const current = ticket.block_notes && typeof ticket.block_notes === 'object'
+      ? { ...ticket.block_notes }
+      : {};
+    const trimmed = (note || '').trim();
+    if (trimmed.length === 0) {
+      delete current[block_type];
+    } else {
+      current[block_type] = trimmed;
+    }
+
+    const { error: updErr } = await supabaseAdmin
+      .from('tickets')
+      .update({ block_notes: current, updated_at: new Date().toISOString() })
+      .eq('id', id);
+
+    if (updErr) {
+      console.error(`[BLOCK-NOTES] Failed to update note for ticket ${id} / ${block_type}:`, updErr.message);
+      return res.status(500).json({ error: 'Failed to update block note', code: 'UPDATE_FAILED' });
+    }
+
+    await supabaseAdmin.from('audit_log').insert({
+      entity_type: 'ticket',
+      entity_id: id,
+      action: 'block_note_update',
+      new_values: { block_type, note: trimmed || null },
+      performed_by: userId,
+    });
+
+    res.json({ block_notes: current });
+  })
+);
+
+/**
  * GET /api/tickets/:id/blocks/:blockType
  * Get specific block (generated on demand)
  */
@@ -2908,23 +2980,32 @@ router.get('/:id/blocks/:blockType', asyncHandler(async (req, res) => {
 
   let block;
   const supplierCode = req.query.supplier_code;
-  
+
+  // Punto 19 — pull the optional per-block note for this block type, if
+  // any. Only the 5 generators listed below honour the note; for every
+  // other block type the value is simply ignored.
+  const blockNotes = (ticket && ticket.block_notes && typeof ticket.block_notes === 'object') ? ticket.block_notes : {};
+  const noteForBlock = (key) => {
+    const v = blockNotes[key];
+    return typeof v === 'string' && v.trim().length > 0 ? v : null;
+  };
+
   switch (blockType) {
     case 'control':
       block = generateControlBlock(ticket);
       break;
     case 'control_a': {
       const activeItemsA = items.filter(i => !i.pedido_excluded);
-      block = generateControlAB(ticket, activeItemsA, 'A');
+      block = generateControlAB(ticket, activeItemsA, 'A', noteForBlock('control_a'));
       break;
     }
     case 'control_b': {
       const activeItemsB = items.filter(i => !i.pedido_excluded);
-      block = generateControlAB(ticket, activeItemsB, 'B');
+      block = generateControlAB(ticket, activeItemsB, 'B', noteForBlock('control_b'));
       break;
     }
     case 'proforma_cliente':
-      block = generateCustomerProformaBlock(ticket, items);
+      block = generateCustomerProformaBlock(ticket, items, noteForBlock('proforma_cliente'));
       break;
     case 'aux_seguimiento':
       block = generateAuxSeguimientoBlock(ticket, items);
@@ -2958,11 +3039,11 @@ router.get('/:id/blocks/:blockType', asyncHandler(async (req, res) => {
       break;
     }
     case 'pedido_final': {
-      block = generatePedidoFinalBlock(ticket, items);
+      block = generatePedidoFinalBlock(ticket, items, noteForBlock('pedido_final'));
       break;
     }
     case 'pedido_supplier': {
-      const supplierBlocks = generatePedidoSupplierBlocks(ticket, items);
+      const supplierBlocks = generatePedidoSupplierBlocks(ticket, items, noteForBlock('pedido_supplier'));
       return res.json({
         block_type: 'pedido_supplier',
         supplier_blocks: supplierBlocks

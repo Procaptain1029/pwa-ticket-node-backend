@@ -60,6 +60,24 @@ function visibleAlternatives(item) {
 }
 
 /**
+ * Punto 19 — append an optional per-block observation to the end of a
+ * generated block. The note is rendered on its own paragraph prefixed
+ * with 📝 so it stands out in WhatsApp / email pastes.
+ *
+ * If `note` is empty / null / whitespace, the block is returned
+ * unchanged and behaves exactly as before this feature existed.
+ *
+ * Used by: customer Proforma, Control A/B, Pedido Final, and Pedido
+ * por Proveedor (each supplier block carries the same note).
+ */
+function appendBlockNote(block, note) {
+  if (!note) return block;
+  const trimmed = String(note).trim();
+  if (trimmed.length === 0) return block;
+  return `${block}\n\n📝 ${trimmed}`;
+}
+
+/**
  * Generate Control block (internal)
  * Contains: #K + IT + priority
  */
@@ -95,7 +113,7 @@ Estado: ${formatStatus(ticket.status)}${ticket.vehicle_info ? `\n🚗 ${formatVe
  *   PISTÓN STD
  *   RIN STD
  */
-export function generateControlAB(ticket, items, group) {
+export function generateControlAB(ticket, items, group, note = null) {
   const emoji = group === 'A' ? '🔴' : '🟢';
   const groupItems = (items || []).filter(i => i.control_group === group);
 
@@ -105,7 +123,7 @@ export function generateControlAB(ticket, items, group) {
   const header = `${emoji} ${group} | ${ticket.k_number} | ${groupCode}`;
 
   if (groupItems.length === 0) {
-    return `${header}\n\n${vehicleStr}\n\n(Sin líneas asignadas al Control ${group})`;
+    return appendBlockNote(`${header}\n\n${vehicleStr}\n\n(Sin líneas asignadas al Control ${group})`, note);
   }
 
   const itemLines = groupItems.map(item => {
@@ -114,14 +132,14 @@ export function generateControlAB(ticket, items, group) {
     return `${desc.toUpperCase()}${qty}`;
   }).join('\n');
 
-  return `${header}\n\n${vehicleStr}\n\n${itemLines}`;
+  return appendBlockNote(`${header}\n\n${vehicleStr}\n\n${itemLines}`, note);
 }
 
 /**
  * Generate Customer Proforma block
  * Customer-facing, compact WhatsApp-ready layout
  */
-export function generateCustomerProformaBlock(ticket, items) {
+export function generateCustomerProformaBlock(ticket, items, note = null) {
   // Compact vehicle info
   const vi = ticket.vehicle_info || {};
   const vehicleParts = [vi.marca, vi.modelo, shouldAppendCilindraje(vi.modelo, vi.cilindraje) ? vi.cilindraje : null, vi.anio ? `(${vi.anio})` : null]
@@ -132,14 +150,14 @@ export function generateCustomerProformaBlock(ticket, items) {
   const dateStr = `${String(now.getDate()).padStart(2, '0')}/${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`;
 
   if (!items || items.length === 0) {
-    return [
+    return appendBlockNote([
       '📄 PROFORMA – DISTRIMIA S.A.',
       `N° ${ticket.k_number} | 📅 ${dateStr}`,
       vehicleParts ? `🚗 ${vehicleParts}` : null,
       '',
       'No hay artículos en este ticket.',
       '⚠️ Valores sujetos a variación sin previo aviso',
-    ].filter(s => s !== null && s !== undefined).join('\n');
+    ].filter(s => s !== null && s !== undefined).join('\n'), note);
   }
 
   // Sort items by status: available first, then verification, then unavailable
@@ -284,7 +302,7 @@ export function generateCustomerProformaBlock(ticket, items) {
   sections.push('');
   sections.push('🤝 Quedamos atentos');
 
-  return sections.filter(s => s !== null && s !== undefined).join('\n');
+  return appendBlockNote(sections.filter(s => s !== null && s !== undefined).join('\n'), note);
 }
 
 /**
@@ -528,7 +546,7 @@ Códigos:
  * Generate Pedido Final block (client-facing confirmed order)
  * Shows only confirmed items (not excluded) with total
  */
-export function generatePedidoFinalBlock(ticket, items) {
+export function generatePedidoFinalBlock(ticket, items, note = null) {
   const vi = ticket.vehicle_info || {};
   const vehicleParts = [vi.marca, vi.modelo, shouldAppendCilindraje(vi.modelo, vi.cilindraje) ? vi.cilindraje : null, vi.anio ? `(${vi.anio})` : null]
     .filter(Boolean).join(' ');
@@ -541,7 +559,7 @@ export function generatePedidoFinalBlock(ticket, items) {
   const excludedCount = items.filter(i => i.pedido_excluded).length;
 
   if (confirmedItems.length === 0) {
-    return '✅ PEDIDO FINAL – DISTRIMIA S.A.\nNo hay líneas confirmadas en este pedido.';
+    return appendBlockNote('✅ PEDIDO FINAL – DISTRIMIA S.A.\nNo hay líneas confirmadas en este pedido.', note);
   }
 
   const itemLines = confirmedItems.map((item, idx) => {
@@ -583,7 +601,7 @@ export function generatePedidoFinalBlock(ticket, items) {
   sections.push('');
   sections.push('🤝 Quedamos atentos');
 
-  return sections.join('\n');
+  return appendBlockNote(sections.join('\n'), note);
 }
 
 /**
@@ -619,7 +637,7 @@ export function generatePedidoFinalBlock(ticket, items) {
  * use by the frontend if it ever wants a per-supplier price summary)
  * but is not surfaced in the supplier-facing text.
  */
-export function generatePedidoSupplierBlocks(ticket, items) {
+export function generatePedidoSupplierBlocks(ticket, items, note = null) {
   const vi = ticket.vehicle_info || {};
   const vehicleParts = [vi.marca, vi.modelo, shouldAppendCilindraje(vi.modelo, vi.cilindraje) ? vi.cilindraje : null, vi.anio ? `(${vi.anio})` : null]
     .filter(Boolean).join(' ');
@@ -659,7 +677,7 @@ export function generatePedidoSupplierBlocks(ticket, items) {
 
     const articulosLabel = `📦 ${sItems.length} artículo${sItems.length === 1 ? '' : 's'}`;
 
-    const content = [
+    const content = appendBlockNote([
       `📦 PEDIDO — ${supplier.toUpperCase()}`,
       `#${ticket.k_number}`,
       vehicleParts ? `🚗 ${vehicleParts.toUpperCase()}` : null,
@@ -669,7 +687,7 @@ export function generatePedidoSupplierBlocks(ticket, items) {
       articulosLabel,
       '',
       SUPPLIER_CLOSING,
-    ].filter(s => s !== null).join('\n');
+    ].filter(s => s !== null).join('\n'), note);
 
     return {
       supplier,
