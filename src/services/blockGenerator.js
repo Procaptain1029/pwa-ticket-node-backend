@@ -78,6 +78,39 @@ function appendBlockNote(block, note) {
 }
 
 /**
+ * Detect seller_note segments that look like Modo Rápido alternative echoes
+ * (e.g. "$55 ART", "44 NPR"). These must not appear in Pedido Final output.
+ */
+function isAlternativeEchoSegment(segment) {
+  const s = (segment || '').trim();
+  if (!s) return false;
+  return /^\$?\d+([.,]\d+)?(\s+\S.*)?$/.test(s);
+}
+
+/**
+ * Return the seller_note that should appear on Pedido Final lines.
+ * Alternative echoes are stripped — only genuine free-text notes remain.
+ */
+function sellerNoteForPedidoBlock(item) {
+  const note = item.seller_note || '';
+  if (!note.trim()) return '';
+
+  const hasStructuredAlts = Array.isArray(item.alternatives) && item.alternatives.length > 0;
+  const segments = note.split(' / ').map(s => s.trim()).filter(Boolean);
+  const kept = segments.filter(seg => !isAlternativeEchoSegment(seg));
+
+  if (hasStructuredAlts) {
+    return kept.join(' / ');
+  }
+
+  if (segments.length > 0 && segments.every(isAlternativeEchoSegment)) {
+    return '';
+  }
+
+  return kept.join(' / ');
+}
+
+/**
  * Generate Control block (internal)
  * Contains: #K + IT + priority
  */
@@ -572,8 +605,9 @@ export function generatePedidoFinalBlock(ticket, items, note = null) {
     const supplierPart = item.supplier_code ? ` | ${item.supplier_code}` : '';
     const codePart = item.codigo_distrimia || item.codigo_oem || '';
     const codeStr = codePart ? ` | Cód: ${codePart}` : '';
-    const note = item.seller_note ? ` | ${item.seller_note}` : '';
-    return `${idx + 1}. ${desc}${qty} — ${price}${brandPart}${supplierPart}${codeStr}${note}`;
+    const inlineNote = sellerNoteForPedidoBlock(item);
+    const noteSuffix = inlineNote ? ` | ${inlineNote}` : '';
+    return `${idx + 1}. ${desc}${qty} — ${price}${brandPart}${supplierPart}${codeStr}${noteSuffix}`;
   });
 
   const total = confirmedItems.reduce((sum, i) => {
