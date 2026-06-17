@@ -651,29 +651,43 @@ export function generatePedidoFinalBlock(ticket, items, note = null) {
 }
 
 /**
+ * One supplier-facing line for Pedido por Proveedor.
+ * Description + qty always; marca and código are referential hints for the proveedor.
+ */
+function formatPedidoSupplierItemLine(item) {
+  const resolved = resolveConfirmedItem(item);
+  const desc = normalizeProductName(item.parsed_description || item.raw_line).toUpperCase();
+  const qty = item.quantity || 1;
+  const refs = [];
+
+  const brand = (resolved.brand || '').trim();
+  if (brand) refs.push(`Marca ref: ${brand.toUpperCase()}`);
+
+  const code = (item.codigo_distrimia || item.codigo_oem || item.codigo_fabrica || '').trim();
+  if (code) refs.push(`Cód: ${code.toUpperCase()}`);
+
+  const base = `${desc} (${qty})`;
+  return refs.length > 0 ? `${base} — ${refs.join(' — ')}` : base;
+}
+
+/**
  * Generate per-supplier Pedido blocks (supplier-facing copy/paste).
  *
- * Format requested by the client:
- *   - One line per confirmed item, format: "DESCRIPCIÓN (QTY)"
- *   - No numbering, no brand, no internal codes, no seller notes
- *     (supplier quotes by description and uses their own catalog).
+ * Format:
+ *   - One line per confirmed item: "DESCRIPCIÓN (QTY) — Marca ref: X — Cód: Y"
+ *   - Marca and código are referential (what we quoted / their catalog ref).
  *   - Alternatives are NOT included — only the confirmed line per item.
- *     This is naturally enforced because we only iterate over `items`,
- *     never `item.alternatives`.
- *   - Subtotal (price) is intentionally OMITTED — that's internal info,
- *     never sent to suppliers.
- *   - Total article count is KEPT so the supplier can validate the
- *     order arrived complete.
- *   - Closing courtesy line at the bottom.
+ *   - Subtotal (price) is intentionally OMITTED — internal info only.
+ *   - Total article count + closing courtesy line at the bottom.
  *
  * Example output:
- *   📦 PEDIDO — JCC
- *   #K000524
- *   🚗 CHEVROLET ONIX LTZ TURBO AC 1.0 4P 4X2 TM (2022)
+ *   📦 PEDIDO — SOLO
+ *   #K000887
+ *   🚗 KIA SOLUTO LX 1400 (2026)
  *
- *   BUJÍAS (4)
- *   TEMPLADOR CADENA (2)
- *   BOMBA DE AGUA (1)
+ *   SERVO FRENO (1) — Marca ref: PROAUTO — Cód: 12312
+ *   BOMBA DE FRENO CON EL ENVASE (1) — Marca ref: OEM — Cód: 28845
+ *   BOMBA PRIMARIA EMBRAGUE (1) — Marca ref: DERY
  *
  *   📦 3 artículos
  *
@@ -707,11 +721,7 @@ export function generatePedidoSupplierBlocks(ticket, items, globalNote = null, s
   return suppliers.map(supplier => {
     const sItems = supplierGroups[supplier];
 
-    const itemLines = sItems.map(item => {
-      const desc = normalizeProductName(item.parsed_description || item.raw_line).toUpperCase();
-      const qty = item.quantity || 1;
-      return `${desc} (${qty})`;
-    });
+    const itemLines = sItems.map(item => formatPedidoSupplierItemLine(item));
 
     // Subtotal kept in API response (unused by UI today, but available)
     // — intentionally NOT rendered into the supplier-facing text. Uses
