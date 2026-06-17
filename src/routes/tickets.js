@@ -2864,24 +2864,31 @@ router.get('/:id/attachments', asyncHandler(async (req, res) => {
  * its generator appends at the very end of its output. Sending an
  * empty / null `note` removes the key.
  *
- * Body: { block_type: BlockNoteKey, note: string|null }
+ * Body: { block_type: BlockNoteKey, note: string|null, supplier_code?: string|null }
  * Allowed keys: proforma_cliente | control_a | control_b
- *               | pedido_supplier | pedido_final
+ *               | per_supplier | pedido_supplier | pedido_final
+ *
+ * When supplier_code is sent with per_supplier or pedido_supplier, the
+ * note is stored per proveedor (pedido_supplier_by_code / per_supplier_by_code)
+ * so each supplier block can carry its own observation. Without
+ * supplier_code, the note applies as a global fallback for all suppliers.
  *
  * No lock check: this is a copy/paste annotation, not item data, so
  * sellers can adjust it at any time (including in `pedido` status).
  */
-const BLOCK_NOTE_KEYS = ['proforma_cliente', 'control_a', 'control_b', 'pedido_supplier', 'pedido_final'];
+const BLOCK_NOTE_KEYS = ['proforma_cliente', 'control_a', 'control_b', 'per_supplier', 'pedido_supplier', 'pedido_final'];
+const SUPPLIER_SCOPED_BLOCK_TYPES = new Set(['per_supplier', 'pedido_supplier']);
 const blockNoteSchema = z.object({
   block_type: z.enum(BLOCK_NOTE_KEYS),
   note: z.string().max(500).optional().nullable(),
+  supplier_code: z.string().max(80).optional().nullable(),
 });
 
 router.put('/:id/block-notes',
   authorize(['seller', 'dispatcher', 'admin']),
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { block_type, note } = blockNoteSchema.parse(req.body);
+    const { block_type, note, supplier_code } = blockNoteSchema.parse(req.body);
     const userId = req.user.id;
 
     const { data: ticket, error: fetchErr } = await supabaseAdmin
@@ -2898,7 +2905,22 @@ router.put('/:id/block-notes',
       ? { ...ticket.block_notes }
       : {};
     const trimmed = (note || '').trim();
-    if (trimmed.length === 0) {
+    const supplierKey = supplier_code?.trim().toUpperCase();
+
+    if (SUPPLIER_SCOPED_BLOCK_TYPES.has(block_type) && supplierKey) {
+      const mapKey = `${block_type}_by_code`;
+      const map = { ...(current[mapKey] || {}) };
+      if (trimmed.length === 0) {
+        delete map[supplierKey];
+      } else {
+        map[supplierKey] = trimmed;
+      }
+      if (Object.keys(map).length === 0) {
+        delete current[mapKey];
+      } else {
+        current[mapKey] = map;
+      }
+    } else if (trimmed.length === 0) {
       delete current[block_type];
     } else {
       current[block_type] = trimmed;
@@ -2918,7 +2940,7 @@ router.put('/:id/block-notes',
       entity_type: 'ticket',
       entity_id: id,
       action: 'block_note_update',
-      new_values: { block_type, note: trimmed || null },
+      new_values: { block_type, supplier_code: supplierKey || null, note: trimmed || null },
       performed_by: userId,
     });
 
@@ -3026,7 +3048,12 @@ router.get('/:id/blocks/:blockType', asyncHandler(async (req, res) => {
     }
     case 'per_supplier': {
       const activeItemsPS = items.filter(i => !i.pedido_excluded);
-      const supplierBlocks = generatePerSupplierBlocks(ticket, activeItemsPS);
+      const supplierBlocks = generatePerSupplierBlocks(
+        ticket,
+        activeItemsPS,
+        noteForBlock('per_supplier'),
+        blockNotes.per_supplier_by_code || {}
+      );
       return res.json({
         block_type: 'per_supplier',
         supplier_blocks: supplierBlocks
@@ -3043,7 +3070,12 @@ router.get('/:id/blocks/:blockType', asyncHandler(async (req, res) => {
       break;
     }
     case 'pedido_supplier': {
-      const supplierBlocks = generatePedidoSupplierBlocks(ticket, items, noteForBlock('pedido_supplier'));
+      const supplierBlocks = generatePedidoSupplierBlocks(
+        ticket,
+        items,
+        noteForBlock('pedido_supplier'),
+        blockNotes.pedido_supplier_by_code || {}
+      );
       return res.json({
         block_type: 'pedido_supplier',
         supplier_blocks: supplierBlocks

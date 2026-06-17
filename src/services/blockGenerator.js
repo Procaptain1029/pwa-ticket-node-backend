@@ -110,6 +110,17 @@ function sellerNoteForPedidoBlock(item) {
   return kept.join(' / ');
 }
 
+/** Resolve the observation for a supplier block (per-supplier wins over global). */
+function noteForSupplierBlock(supplier, globalNote, supplierNotesByCode = {}) {
+  const key = (supplier || '').toUpperCase();
+  const perSupplier =
+    supplierNotesByCode[key]
+    || supplierNotesByCode[supplier]
+    || null;
+  if (perSupplier && String(perSupplier).trim()) return perSupplier;
+  return globalNote;
+}
+
 /**
  * Generate Control block (internal)
  * Contains: #K + IT + priority
@@ -497,7 +508,7 @@ Margen: ${formatPrice(totalSell - totalCost)}
  * Generate per-supplier blocks
  * Groups items by supplier_code and generates a separate copyable block per supplier
  */
-export function generatePerSupplierBlocks(ticket, items) {
+export function generatePerSupplierBlocks(ticket, items, globalNote = null, supplierNotesByCode = {}) {
   const vehicleLine = formatVehicleInfo(ticket.vehicle_info);
 
   // Group items by supplier_code
@@ -535,7 +546,7 @@ export function generatePerSupplierBlocks(ticket, items) {
     return {
       supplier,
       item_count: sItems.length,
-      content: `╔════════════════════════════════╗
+      content: appendBlockNote(`╔════════════════════════════════╗
 ║  PROVEEDOR: ${supplier.toUpperCase().padEnd(18)} ║
 ╚════════════════════════════════╝
 #${ticket.k_number} | IT: ${sItems.length}
@@ -545,7 +556,8 @@ ${vehicleLine ? `🚗 ${vehicleLine}` : ''}
 ${itemLines}
 
 ───────────────────────────────
-Costo: ${formatPrice(groupCost)} | Venta: ${formatPrice(groupSell)}${ticket.assigned_to_user ? `\n🤝 ${ticket.assigned_to_user.full_name}` : ''}`
+Costo: ${formatPrice(groupCost)} | Venta: ${formatPrice(groupSell)}${ticket.assigned_to_user ? `\n🤝 ${ticket.assigned_to_user.full_name}` : ''}`,
+        noteForSupplierBlock(supplier, globalNote, supplierNotesByCode))
     };
   });
 }
@@ -671,7 +683,7 @@ export function generatePedidoFinalBlock(ticket, items, note = null) {
  * use by the frontend if it ever wants a per-supplier price summary)
  * but is not surfaced in the supplier-facing text.
  */
-export function generatePedidoSupplierBlocks(ticket, items, note = null) {
+export function generatePedidoSupplierBlocks(ticket, items, globalNote = null, supplierNotesByCode = {}) {
   const vi = ticket.vehicle_info || {};
   const vehicleParts = [vi.marca, vi.modelo, shouldAppendCilindraje(vi.modelo, vi.cilindraje) ? vi.cilindraje : null, vi.anio ? `(${vi.anio})` : null]
     .filter(Boolean).join(' ');
@@ -721,7 +733,7 @@ export function generatePedidoSupplierBlocks(ticket, items, note = null) {
       articulosLabel,
       '',
       SUPPLIER_CLOSING,
-    ].filter(s => s !== null).join('\n'), note);
+    ].filter(s => s !== null).join('\n'), noteForSupplierBlock(supplier, globalNote, supplierNotesByCode));
 
     return {
       supplier,
