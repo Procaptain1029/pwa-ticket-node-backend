@@ -112,13 +112,35 @@ function sellerNoteForPedidoBlock(item) {
 
 /** Resolve the observation for a supplier block (per-supplier wins over global). */
 function noteForSupplierBlock(supplier, globalNote, supplierNotesByCode = {}) {
-  const key = (supplier || '').toUpperCase();
+  const key = normalizeSupplierKey(supplier);
   const perSupplier =
     supplierNotesByCode[key]
     || supplierNotesByCode[supplier]
     || null;
   if (perSupplier && String(perSupplier).trim()) return perSupplier;
   return globalNote;
+}
+
+/**
+ * Canonical supplier key for grouping blocks — trim + uppercase so
+ * "SOLO", "solo", "SOLO " collapse into one proveedor block.
+ */
+function normalizeSupplierKey(code) {
+  const trimmed = (code || '').trim();
+  return trimmed ? trimmed.toUpperCase() : 'Sin proveedor';
+}
+
+/**
+ * Group ticket items by normalized supplier_code.
+ */
+function groupItemsBySupplier(items) {
+  const groups = {};
+  for (const item of items) {
+    const key = normalizeSupplierKey(item.supplier_code);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(item);
+  }
+  return groups;
 }
 
 /**
@@ -511,13 +533,8 @@ Margen: ${formatPrice(totalSell - totalCost)}
 export function generatePerSupplierBlocks(ticket, items, globalNote = null, supplierNotesByCode = {}) {
   const vehicleLine = formatVehicleInfo(ticket.vehicle_info);
 
-  // Group items by supplier_code
-  const supplierGroups = {};
-  items.forEach(item => {
-    const supplier = item.supplier_code || 'Sin proveedor';
-    if (!supplierGroups[supplier]) supplierGroups[supplier] = [];
-    supplierGroups[supplier].push(item);
-  });
+  // Group items by supplier_code (normalized so SOLO/solo/SOLO  → one block)
+  const supplierGroups = groupItemsBySupplier(items);
 
   const suppliers = Object.keys(supplierGroups);
   if (suppliers.length === 0) return 'No hay items con proveedor asignado.';
@@ -705,13 +722,8 @@ export function generatePedidoSupplierBlocks(ticket, items, globalNote = null, s
   // Only confirmed positive items (no excluded, no negatives, no pending)
   const confirmedItems = items.filter(i => !i.pedido_excluded && i.status === 'positive');
 
-  // Group by supplier
-  const supplierGroups = {};
-  confirmedItems.forEach(item => {
-    const supplier = item.supplier_code || 'Sin proveedor';
-    if (!supplierGroups[supplier]) supplierGroups[supplier] = [];
-    supplierGroups[supplier].push(item);
-  });
+  // Group by supplier (normalized)
+  const supplierGroups = groupItemsBySupplier(confirmedItems);
 
   const suppliers = Object.keys(supplierGroups);
   if (suppliers.length === 0) return [];
@@ -734,7 +746,7 @@ export function generatePedidoSupplierBlocks(ticket, items, globalNote = null, s
     const articulosLabel = `📦 ${sItems.length} artículo${sItems.length === 1 ? '' : 's'}`;
 
     const content = appendBlockNote([
-      `📦 PEDIDO — ${supplier.toUpperCase()}`,
+      `📦 PEDIDO — ${supplier}`,
       `#${ticket.k_number}`,
       vehicleParts ? `🚗 ${vehicleParts.toUpperCase()}` : null,
       '',
