@@ -1,4 +1,4 @@
-import openai from '../config/openai.js';
+import openai, { OPENAI_VISION_MODEL } from '../config/openai.js';
 import { supabaseAdmin } from '../config/supabase.js';
 import fs from 'fs';
 import path from 'path';
@@ -12,6 +12,68 @@ import { mergeVehicleInfoWithModelBase } from './modelBaseMatcher.js';
  */
 
 const STORAGE_BUCKET = 'ticket-attachments';
+
+/** Max bytes before forcing lower vision detail (reduces OpenAI payload/timeouts). */
+const VISION_HIGH_DETAIL_MAX_BYTES = 1.5 * 1024 * 1024;
+
+function isRetryableOpenAiError(err) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  const status = err?.status || err?.response?.status;
+  return (
+    msg.includes('premature close')
+    || msg.includes('econnreset')
+    || msg.includes('etimedout')
+    || msg.includes('socket hang up')
+    || msg.includes('network')
+    || msg.includes('fetch failed')
+    || status === 429
+    || status === 500
+    || status === 502
+    || status === 503
+    || status === 504
+  );
+}
+
+async function withOpenAiRetries(fn, label = 'openai') {
+  const attempts = Number(process.env.OPENAI_VISION_RETRY_ATTEMPTS) || 3;
+  const baseDelayMs = Number(process.env.OPENAI_VISION_RETRY_DELAY_MS) || 1500;
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isRetryableOpenAiError(err) || i === attempts) throw err;
+      const wait = baseDelayMs * Math.pow(2, i - 1);
+      console.warn(`[${label}] attempt ${i}/${attempts} failed: ${err.message}; retrying in ${wait}ms`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  throw lastErr;
+}
+
+function visionDetailForBuffer(buffer) {
+  return buffer.length <= VISION_HIGH_DETAIL_MAX_BYTES ? 'high' : 'auto';
+}
+
+/**
+ * Run vision analysis tasks with limited concurrency (avoids overloading OpenAI / Render).
+ */
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const idx = nextIndex++;
+      results[idx] = await mapper(items[idx], idx);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
 
 /** Model year on Ecuador matrícula — not the top-right registration "AÑO". */
 const CAR_YEAR_MIN = 1980;
@@ -175,15 +237,17 @@ export async function getAttachmentUrl(filePath) {
 export async function analyzeImage(imageBuffer, mimeType) {
   const base64Image = imageBuffer.toString('base64');
   const dataUrl = `data:${mimeType};base64,${base64Image}`;
+  const detail = visionDetailForBuffer(imageBuffer);
 
-  const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    temperature: 0.1,
-    max_tokens: 1200,
-    messages: [
-      {
-        role: 'system',
-        content: `Eres un asistente experto en autopartes y vehículos en Ecuador/Latinoamérica.
+  const response = await withOpenAiRetries(
+    () => openai.chat.completions.create({
+      model: OPENAI_VISION_MODEL,
+      temperature: 0.1,
+      max_tokens: 1200,
+      messages: [
+        {
+          role: 'system',
+          content: `Eres un asistente experto en autopartes y vehículos en Ecuador/Latinoamérica.
 Analiza la imagen y extrae toda la información relevante.
 
 Responde SIEMPRE en este formato JSON exacto:
@@ -257,7 +321,7 @@ Reglas generales:
         content: [
           {
             type: 'image_url',
-            image_url: { url: dataUrl, detail: 'high' }
+            image_url: { url: dataUrl, detail }
           },
           {
             type: 'text',
@@ -266,7 +330,9 @@ Reglas generales:
         ]
       }
     ]
-  });
+    }),
+    'IMAGE-VISION'
+  );
 
   const content = response.choices[0]?.message?.content || '{}';
   
@@ -372,8 +438,11 @@ Reglas generales:
  * @returns {Promise<{ vehicle_info: object|null, extracted_texts: string[], descriptions: string[], products: Array<{name: string, quantity: number, code: string|null}> }>}
  */
 export async function analyzeMultipleImages(images) {
-  const results = await Promise.all(
-    images.map(img => analyzeImage(img.buffer, img.mimeType))
+  const concurrency = Number(process.env.OPENAI_VISION_CONCURRENCY) || 2;
+  const results = await mapWithConcurrency(
+    images,
+    concurrency,
+    (img) => analyzeImage(img.buffer, img.mimeType)
   );
 
   // Merge vehicle info (first non-null wins for each field)

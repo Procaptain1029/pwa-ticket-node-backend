@@ -878,7 +878,24 @@ router.post('/analyze-images',
     }));
 
     // Analyze all images with GPT-4o Vision
-    const analysis = await analyzeMultipleImages(images);
+    let analysis;
+    try {
+      analysis = await analyzeMultipleImages(images);
+    } catch (err) {
+      console.error('[ANALYZE-IMAGES] OpenAI vision failed:', err);
+      for (const file of req.files) {
+        try { fs.unlinkSync(file.path); } catch {}
+      }
+      const retryable = String(err?.message || '').toLowerCase().includes('premature close')
+        || String(err?.message || '').toLowerCase().includes('timeout');
+      return res.status(retryable ? 503 : 500).json({
+        error: retryable
+          ? 'El análisis de imagen tardó demasiado o se interrumpió. Intenta de nuevo con menos imágenes o fotos más pequeñas.'
+          : 'No se pudo analizar la imagen con IA.',
+        code: retryable ? 'OPENAI_TRANSIENT' : 'OPENAI_ERROR',
+        details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      });
+    }
 
     // Clean up temp files
     for (const file of req.files) {
