@@ -151,6 +151,12 @@
   },
   {
     "marca": "MITSUBISHI",
+    "modelo": "MONTERO",
+    "aliases": ["MITSUBISHI MONTERO", "MONTERO SPORT", "MONTERO 3.0", "MONTERO 3.5"],
+    "cilindraje": null
+  },
+  {
+    "marca": "MITSUBISHI",
     "modelo": "L200",
     "aliases": ["MITSUBISHI L200"],
     "cilindraje": null

@@ -84,7 +84,9 @@ export function mergeVehicleInfoWithModelBase(baseVehicle, textSources = []) {
 
   if (!merged.modelo || detected.confidence >= 0.9) merged.modelo = detected.modelo;
   if (!merged.marca || detected.confidence >= 0.9) merged.marca = detected.marca;
-  if (!merged.cilindraje || detected.confidence >= 0.9) merged.cilindraje = detected.cilindraje;
+  if (detected.cilindraje && (!merged.cilindraje || detected.confidence >= 0.9)) {
+    merged.cilindraje = detected.cilindraje;
+  }
 
   merged.model_detection_source = detected.source;
   merged.model_detection_confidence = detected.confidence;

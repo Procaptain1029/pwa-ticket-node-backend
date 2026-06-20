@@ -1,6 +1,6 @@
 import openai, { OPENAI_MODEL } from '../config/openai.js';
 import { consolidateMatriculaAnio } from './mediaProcessor.js';
-import { mergeVehicleInfoWithModelBase } from './modelBaseMatcher.js';
+import { mergeVehicleInfoWithModelBase, detectVehicleFromModelBase } from './modelBaseMatcher.js';
 
 /**
  * AI-powered ticket parser service
@@ -32,6 +32,7 @@ VEHICLE DETECTION RULES:
   Example: "NUEVO MAZDA3 AC 2.0 4P 4X2 TM\nRotula\nBomba de agua" → vehicle_info.modelo="NUEVO MAZDA3 AC 2.0 4P 4X2 TM", items=[Rotula, Bomba de agua]
   Example: "LUV 2.5 2004\nCIGÜEÑAL\nCAMISAS\nPISTONES" → vehicle_info.marca="CHEVROLET", vehicle_info.modelo="LUV", vehicle_info.cilindraje="2500cc", vehicle_info.anio="2004", items=[CIGÜEÑAL, CAMISAS, PISTONES]
   Example: "santa fe 2.4 2015\njuego de chaquetas biela y de bancada" → vehicle_info.marca="HYUNDAI", vehicle_info.modelo="SANTA FE", vehicle_info.cilindraje="2400cc", vehicle_info.anio="2015", items=[juego de chaquetas biela y de bancada]
+  Example: "montero 3.0 2008 Kit completo de distribución\nBomba de agua" → vehicle_info.marca="MITSUBISHI", vehicle_info.modelo="MONTERO", vehicle_info.cilindraje="3000cc", vehicle_info.anio="2008", items=[Kit completo de distribución, Bomba de agua] — the vehicle prefix on line 1 is NOT an item
 - CRITICAL: Scan the ENTIRE text for vehicle info, not just the first line. Vehicle info can be embedded in sentences.
   Example: "TAL VEZ PARA EL PICANTO G4LA 2018 PISTONES +20" → vehicle_info.marca="KIA", vehicle_info.modelo="PICANTO G4LA", vehicle_info.anio="2018", items=[PISTONES +20]
   Example: "para el CIVIC 2019 bomba de agua" → vehicle_info.marca="HONDA", vehicle_info.modelo="CIVIC", vehicle_info.anio="2019", items=[bomba de agua]
@@ -64,6 +65,7 @@ VEHICLE DETECTION RULES:
 - CRITICAL: "santa fe 2.4 2015" is vehicle info (marca=HYUNDAI, modelo=SANTA FE, cilindraje=2400cc, anio=2015), NOT a part item
 - CRITICAL: "D-MAX 3.0 2018" is vehicle info (marca=CHEVROLET, modelo=D-MAX, cilindraje=3000cc, anio=2018), NOT a part item
 - CRITICAL: "GRAND VITARA SZ 2.0 2014" is vehicle info (marca=CHEVROLET, modelo=GRAND VITARA SZ, cilindraje=2000cc, anio=2014), NOT a part item
+- CRITICAL: "MONTERO" / "montero 3.0 2008" is vehicle info (marca=MITSUBISHI, modelo=MONTERO, cilindraje=3000cc, anio=2008), NOT a part item. When the first line mixes vehicle + part ("montero 3.0 2008 Kit completo de distribución"), split: vehicle in vehicle_info, only "Kit completo de distribución" as item
 
 FIELDS TO EXTRACT:
 - ALWAYS extract: marca, modelo, año, cilindraje, motor, placa (license plate)
@@ -179,6 +181,117 @@ function estimateMaxTokens(text) {
   return Math.min(16000, Math.max(2500, 700 + lineCount * 120));
 }
 
+/** Spanish autopart words — suffix after vehicle prefix on the same line. */
+const PART_WORD_PATTERN = /\b(kit|bomba|banda|templador|filtro|pastilla|rotula|piston|camisa|junta|empaque|polea|correa|rodamiento|amortiguador|disco|balancin|valvula|buje|terminal|cremallera|alternador|arranque|radiador|termostato|bujia|inyector|turbo|intercooler|completo|distribuci[oó]n|accesorio|hidraulico|delantero|trasero|superior|inferior|juego|tensor|reten|sello|soporte|biela|bancada|culata|anillo|casquete|cigueñal|cadena)\b/i;
+
+function looksLikePartDescription(text) {
+  if (!text || text.trim().length < 3) return false;
+  return PART_WORD_PATTERN.test(text);
+}
+
+/**
+ * When the first pasted line mixes vehicle + part on one row
+ * (e.g. "montero 3.0 2008 Kit completo de distribución"), split them.
+ */
+export function splitVehicleAndPartFromLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+
+  // modelo + motor + año + parte
+  let match = trimmed.match(/^(.+?\s+\d+(?:\.\d+)?\s+(?:19|20)\d{2})\s+(.+)$/i);
+  if (match && looksLikePartDescription(match[2])) {
+    return { vehicleText: match[1].trim(), partText: match[2].trim() };
+  }
+
+  // modelo + año + parte
+  match = trimmed.match(/^(.+?\s+(?:19|20)\d{2})\s+(.+)$/i);
+  if (match && looksLikePartDescription(match[2]) && match[1].trim().split(/\s+/).length <= 6) {
+    return { vehicleText: match[1].trim(), partText: match[2].trim() };
+  }
+
+  // modelo + motor + parte (sin año)
+  match = trimmed.match(/^(.+?\s+\d+\.\d+)\s+(.+)$/i);
+  if (match && looksLikePartDescription(match[2])) {
+    return { vehicleText: match[1].trim(), partText: match[2].trim() };
+  }
+
+  const tokens = trimmed.split(/\s+/);
+  for (let i = tokens.length - 1; i >= 2; i--) {
+    const vehicleText = tokens.slice(0, i).join(' ');
+    const partText = tokens.slice(i).join(' ');
+    if (!looksLikePartDescription(partText)) continue;
+    const detected = detectVehicleFromModelBase(vehicleText);
+    if (detected && detected.confidence >= 0.75) {
+      return { vehicleText, partText };
+    }
+  }
+
+  return null;
+}
+
+function parseInlineVehicleText(text) {
+  let working = text.trim();
+  const info = {};
+
+  const yearMatch = working.match(/\b((?:19|20)\d{2})\b/);
+  if (yearMatch) {
+    info.anio = yearMatch[1];
+    working = working.replace(yearMatch[0], '').trim();
+  }
+
+  const engineMatch = working.match(/\b(\d\.\d)\b/);
+  if (engineMatch) {
+    info.cilindraje = `${Math.round(parseFloat(engineMatch[1]) * 1000)}cc`;
+    working = working.replace(engineMatch[0], '').trim();
+  } else {
+    const ccMatch = working.match(/\b(\d{3,4})\b/);
+    if (ccMatch) {
+      const n = parseInt(ccMatch[1], 10);
+      if (n >= 800 && n <= 6000 && ccMatch[1] !== info.anio) {
+        info.cilindraje = `${ccMatch[1]}cc`;
+        working = working.replace(ccMatch[0], '').trim();
+      }
+    }
+  }
+
+  info.modelo = working.toUpperCase().replace(/\s+/g, ' ').trim();
+  const merged = mergeVehicleInfoWithModelBase(info, [text]);
+  return normalizeVehicleInfo(merged) || {};
+}
+
+function mergeParsedVehicleFields(target, source) {
+  if (!source) return target;
+  for (const [key, val] of Object.entries(source)) {
+    if (val != null && val !== '' && !target[key]) target[key] = val;
+  }
+  return target;
+}
+
+function stripVehiclePrefixFromItems(items, vehicleInfo) {
+  if (!items?.length) return items;
+  const first = items[0];
+  const desc = (first.description || first.raw_line || '').trim();
+  const split = splitVehicleAndPartFromLine(desc);
+  if (split) {
+    return [
+      { ...first, description: split.partText, raw_line: split.partText },
+      ...items.slice(1),
+    ];
+  }
+  if (vehicleInfo?.modelo && vehicleInfo?.anio) {
+    const modelo = vehicleInfo.modelo.toUpperCase();
+    const re = new RegExp(
+      `^${modelo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s+\\d+(?:\\.\\d+)?)?\\s+${vehicleInfo.anio}\\s+`,
+      'i'
+    );
+    const stripped = desc.replace(re, '').trim();
+    if (stripped && stripped !== desc && looksLikePartDescription(stripped)) {
+      return [{ ...first, description: stripped, raw_line: stripped }, ...items.slice(1)];
+    }
+  }
+  return items;
+}
+
 /**
  * Clean pasted text before sending to OpenAI — removes proforma/footer noise,
  * extracts labeled vehicle block, keeps part request lines.
@@ -187,6 +300,7 @@ export function preprocessRawText(rawText) {
   const vehicleInfo = {};
   const partLines = [];
   let inVehicleSection = false;
+  let isFirstContentLine = true;
 
   for (const line of rawText.split('\n')) {
     const trimmed = line.trim();
@@ -221,6 +335,16 @@ export function preprocessRawText(rawText) {
 
     if (/^[\d]{1,2}[\/.-][\d]{1,2}/.test(trimmed) && trimmed.includes(':') && trimmed.length < 80) {
       continue;
+    }
+
+    if (isFirstContentLine) {
+      isFirstContentLine = false;
+      const split = splitVehicleAndPartFromLine(trimmed);
+      if (split) {
+        mergeParsedVehicleFields(vehicleInfo, parseInlineVehicleText(split.vehicleText));
+        partLines.push(split.partText);
+        continue;
+      }
     }
 
     partLines.push(trimmed);
@@ -616,7 +740,8 @@ export function dedupeItemsWithinBatch(items) {
 function enhanceParsedTickets(parsed, groupCode, originalRawText, extractedVehicle = {}) {
   let totalDroppedDuplicates = 0;
   const tickets = parsed.tickets.map((ticket) => {
-    const expandedItems = splitCompoundItems(ticket.items || []);
+    let expandedItems = splitCompoundItems(ticket.items || []);
+    expandedItems = stripVehiclePrefixFromItems(expandedItems, ticket.vehicle_info);
     // Intra-batch dedup: when the source paste contains the same line twice
     // (very common with WhatsApp tables being pasted twice) we keep only the
     // first occurrence so the seller doesn't get duplicated ticket items.
