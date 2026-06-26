@@ -186,7 +186,7 @@ router.post('/c0-import',
           raw_line: item.description,
           parsed_description: item.description,
           quantity: item.quantity || 1,
-          status: conversion === 'positive' ? 'quoted' : 'pending_info'
+          status: conversion === 'positive' ? 'positive' : conversion === 'negative' ? 'negative' : 'pending_info'
         }));
 
         await supabaseAdmin.from('ticket_items').insert(itemsToInsert);
@@ -205,7 +205,7 @@ router.post('/c0-import',
             conversion,
             putix_ref: rec.putix_ref || null
           },
-          performed_by: req.user.id
+          performed_by: seller.id
         });
 
         imported.push({

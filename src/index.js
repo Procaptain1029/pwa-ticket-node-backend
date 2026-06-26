@@ -16,6 +16,7 @@ import groupRoutes from './routes/groups.js';
 import rankingRoutes from './routes/ranking.js';
 import reportRoutes from './routes/reports.js';
 import integrationRoutes from './routes/integrations.js';
+import integrationV1Routes from './routes/integrationsV1.js';
 
 // Import middleware
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
@@ -77,6 +78,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/groups', groupRoutes);
 app.use('/api/ranking', rankingRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/integrations/v1', integrationV1Routes);
 app.use('/api/integrations', integrationRoutes);
 
 // Error handling
