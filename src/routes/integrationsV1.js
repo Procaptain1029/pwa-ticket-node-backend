@@ -32,7 +32,7 @@ function requirePutixApiKey(req, res, next) {
 function requireAdminDashboard(req, res, next) {
   authenticate(req, res, (err) => {
     if (err) return next(err);
-    authorize(['admin', 'dispatcher', 'operator'])(req, res, next);
+    authorize(['admin', 'dispatcher', 'operator', 'seller'])(req, res, next);
   });
 }
 
