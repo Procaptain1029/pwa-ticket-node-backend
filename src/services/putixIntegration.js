@@ -24,6 +24,60 @@ import {
 
 export const PUTIX_API_VERSION = 'v1';
 
+/**
+ * Ticket statuses PUTIX synchronizes / is allowed to write back to.
+ * Maps to flujo.md: Pendiente, Pendiente de Revisión, En Proceso, Listo.
+ */
+export const PUTIX_SYNC_STATUSES = ['pending', 'pending_review', 'in_progress', 'ready'];
+
+/**
+ * Allow-list of ticket header fields PUTIX may update via write-back.
+ * Anything not listed (PKs, FKs, integrity identifiers, audit/lock/SLA fields)
+ * is silently ignored and reported back in `ignored_fields`.
+ */
+export const PUTIX_EDITABLE_TICKET_FIELDS = [
+  'status',
+  'priority',
+  'length_class',
+  'vin',
+  'vehicle_info',
+  'seller_notes',
+  'block_notes',
+  'notes',
+  'is_venta_concreta',
+  'conversion_status',
+  'duplicate_label',
+  'sender_name',
+  'sender_phone',
+  'client_phone',
+];
+
+/** Allow-list of ticket_item (detalle) fields PUTIX may update via write-back. */
+export const PUTIX_EDITABLE_ITEM_FIELDS = [
+  'parsed_description',
+  'quantity',
+  'status',
+  'source',
+  'brand',
+  'cost_price',
+  'selling_price',
+  'supplier_code',
+  'codigo_distrimia',
+  'codigo_oem',
+  'codigo_fabrica',
+  'validity_status',
+  'validity_expires_at',
+  'estimated_delivery',
+  'seller_note',
+  'internal_note',
+  'pedido_excluded',
+  'control_group',
+  'audit_code_type',
+  'alternative_confirmed',
+  'confirmed_alternative_id',
+  'item_order',
+];
+
 /** Integration roadmap phases — shown in admin dashboard */
 export const PUTIX_PHASES = [
   {
@@ -41,29 +95,30 @@ export const PUTIX_PHASES = [
   {
     id: 'phase_3',
     name: 'Sincronización',
-    description: 'Polling con updated_since; webhooks en fase posterior según acuerdo con PUTIX.',
-    status: 'in_progress',
+    description: 'Polling con updated_since (PUTIX usa lastSyncAt = ahora - 24h). Webhooks en fase posterior según acuerdo.',
+    status: 'completed',
   },
   {
     id: 'phase_4',
     name: 'Pantallas PUTIX',
     description: 'Proforma y Pedido en PUTIX basados en la estructura expuesta por Mini Web.',
-    status: 'pending',
+    status: 'in_progress',
     owner: 'PUTIX',
   },
   {
     id: 'phase_5',
-    name: 'Escritura (opcional)',
-    description: 'Endpoints de write-back desde PUTIX si el equipo confirma campos bidireccionales.',
-    status: 'pending',
+    name: 'Escritura (write-back)',
+    description: 'PATCH /tickets/:id: PUTIX actualiza cabecera y detalle (campos editables, excepto PK/FK/identificadores). Solo tickets en estados sincronizables.',
+    status: 'in_progress',
   },
 ];
 
 export const PUTIX_ENDPOINTS = [
   { method: 'GET', path: '/api/integrations/v1/schema', auth: 'X-API-Key o JWT admin', description: 'Catálogo de campos, enums y ejemplo de payload' },
-  { method: 'GET', path: '/api/integrations/v1/tickets', auth: 'X-API-Key', description: 'Listado paginado con filtros y updated_since' },
+  { method: 'GET', path: '/api/integrations/v1/tickets', auth: 'X-API-Key', description: 'Listado paginado con filtros: status, updated_since, created_since. Para histórico usar status=closed' },
   { method: 'GET', path: '/api/integrations/v1/tickets/:id', auth: 'X-API-Key', description: 'Ticket completo: ítems, alternativas, usuarios, SLA, extensiones' },
   { method: 'GET', path: '/api/integrations/v1/tickets/:id/blocks', auth: 'X-API-Key', description: 'Todos los bloques de texto generados (proforma, pedido, control, etc.)' },
+  { method: 'PATCH', path: '/api/integrations/v1/tickets/:id', auth: 'X-API-Key', description: 'Write-back: actualiza cabecera y detalle. Solo estados sincronizables. Campos no editables son ignorados' },
   { method: 'GET', path: '/api/integrations/v1/health', auth: 'X-API-Key', description: 'Health check y estadísticas de sincronización' },
   { method: 'POST', path: '/api/integrations/c0-import', auth: 'X-API-Key', description: 'Legacy: importación masiva C0 histórica (opcional)' },
 ];
@@ -180,7 +235,23 @@ export const PUTIX_SCHEMA = {
     strategy: 'polling',
     recommended_interval_seconds: 60,
     delta_filter: 'updated_since (ISO-8601) en GET /tickets',
+    lookback_window: 'PUTIX usa lastSyncAt = ahora - 24h para no perder cambios entre ciclos',
+    syncable_statuses: ['pending', 'pending_review', 'in_progress', 'ready'],
+    closed_history: 'Para el histórico interno de PUTIX: GET /tickets?status=closed&sort_order=asc (opcional created_since para backfill incremental)',
     note: 'Mini Web es la fuente de verdad para proforma; PUTIX lee y refleja en sus pantallas.',
+  },
+  write_back: {
+    endpoint: 'PATCH /api/integrations/v1/tickets/:id',
+    description: 'PUTIX actualiza cabecera (ticket) y detalle (items). Modelo allow-list: solo se aplican los campos editables; cualquier PK/FK/identificador enviado se ignora y se reporta en ignored_fields.',
+    only_syncable_statuses: true,
+    body_example: {
+      ticket: { status: 'ready', seller_notes: 'Confirmado por PUTIX', vehicle_info: { marca: 'CHEVROLET' } },
+      items: [{ id: '<uuid-item>', selling_price: 18.5, supplier_code: 'IMP-001', status: 'positive' }],
+    },
+    editable_ticket_fields: PUTIX_EDITABLE_TICKET_FIELDS,
+    editable_item_fields: PUTIX_EDITABLE_ITEM_FIELDS,
+    non_editable: 'id, k_number, group_code, raw_text, putix_ref, *_ticket_id, assigned_to, created_by/updated_by, created_at/updated_at, sla_*, lock_* y demás identificadores de integridad',
+    note: 'No agrega ni elimina items (solo actualiza los existentes por id). updated_at se refresca para que el polling refleje el cambio.',
   },
 };
 
@@ -442,6 +513,7 @@ export async function listTicketsForPutix(filters = {}) {
     group_code,
     assigned_to,
     updated_since,
+    created_since,
     k_number,
     entry_type,
     sort_order = 'desc',
@@ -488,6 +560,7 @@ export async function listTicketsForPutix(filters = {}) {
   if (entry_type) query = query.eq('entry_type', entry_type);
   if (k_number) query = query.ilike('k_number', `%${k_number}%`);
   if (updated_since) query = query.gte('updated_at', updated_since);
+  if (created_since) query = query.gte('created_at', created_since);
 
   query = query
     .order('updated_at', { ascending: sort_order === 'asc' })
@@ -515,6 +588,7 @@ export async function listTicketsForPutix(filters = {}) {
       group_code: group_code || null,
       assigned_to: assigned_to || null,
       updated_since: updated_since || null,
+      created_since: created_since || null,
       entry_type: entry_type || null,
       k_number: k_number || null,
     },
@@ -562,5 +636,224 @@ export async function getIntegrationStats() {
     putix_c0_imported: putixC0Count || 0,
     latest_ticket: latestTicket || null,
     server_time: now.toISOString(),
+  };
+}
+
+// ─── PUTIX write-back (v1 phase 5) ───────────────────────────────────────────
+
+/** Enum whitelists per editable field, sourced from PUTIX_SCHEMA. */
+const WRITE_BACK_ENUMS = {
+  ticket: {
+    status: PUTIX_SCHEMA.enums.ticket_status,
+    priority: PUTIX_SCHEMA.enums.priority,
+    length_class: PUTIX_SCHEMA.enums.length_class,
+    conversion_status: PUTIX_SCHEMA.enums.conversion_status,
+    duplicate_label: PUTIX_SCHEMA.enums.duplicate_label,
+  },
+  item: {
+    status: PUTIX_SCHEMA.enums.item_status,
+    source: PUTIX_SCHEMA.enums.item_source,
+    validity_status: PUTIX_SCHEMA.enums.validity_status,
+    audit_code_type: PUTIX_SCHEMA.enums.audit_code_type,
+    control_group: ['A', 'B'],
+  },
+};
+
+/** Keep only allow-listed keys; report the rest so PUTIX knows what was dropped. */
+function pickAllowedFields(source, allowList) {
+  const picked = {};
+  const ignored = [];
+  for (const key of Object.keys(source || {})) {
+    if (key === 'id') continue; // id is used only to locate the row, never modified
+    if (allowList.includes(key)) picked[key] = source[key];
+    else ignored.push(key);
+  }
+  return { picked, ignored };
+}
+
+/** Validate enum-constrained fields; returns a list of human-readable errors. */
+function validateEnumFields(obj, enumMap, prefix = '') {
+  const errors = [];
+  for (const [field, allowed] of Object.entries(enumMap)) {
+    if (field in obj && obj[field] !== null && obj[field] !== undefined && !allowed.includes(obj[field])) {
+      errors.push(`${prefix}${field}: valor no válido "${obj[field]}" (permitidos: ${allowed.join(', ')})`);
+    }
+  }
+  return errors;
+}
+
+/**
+ * Apply a PUTIX write-back to a ticket (header) and/or its items (detail).
+ *
+ * Security model: strict allow-list. Only fields in PUTIX_EDITABLE_TICKET_FIELDS /
+ * PUTIX_EDITABLE_ITEM_FIELDS are applied; PKs, FKs and integrity identifiers are
+ * ignored (and reported). Only tickets in PUTIX_SYNC_STATUSES can be written.
+ *
+ * @returns {{ ok: boolean, statusCode: number, ... }}
+ */
+export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
+  const { enforceSyncStatus = true, includeBlocks = true } = options;
+  const serviceUserId = process.env.PUTIX_SERVICE_USER_ID || null;
+
+  const ticketPatchRaw = body?.ticket && typeof body.ticket === 'object' && !Array.isArray(body.ticket)
+    ? body.ticket
+    : {};
+  const itemsPatchRaw = Array.isArray(body?.items) ? body.items : [];
+
+  if (Object.keys(ticketPatchRaw).length === 0 && itemsPatchRaw.length === 0) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: 'Debe enviar "ticket" y/o "items" con al menos un campo editable',
+      code: 'EMPTY_UPDATE',
+    };
+  }
+
+  // ── Load current ticket ──
+  const { data: current, error: loadErr } = await supabaseAdmin
+    .from('tickets')
+    .select('id, status')
+    .eq('id', ticketId)
+    .single();
+
+  if (loadErr) {
+    if (loadErr.code === 'PGRST116') {
+      return { ok: false, statusCode: 404, error: 'Ticket no encontrado', code: 'NOT_FOUND' };
+    }
+    throw loadErr;
+  }
+
+  if (enforceSyncStatus && !PUTIX_SYNC_STATUSES.includes(current.status)) {
+    return {
+      ok: false,
+      statusCode: 409,
+      error: `El ticket está en estado "${current.status}" y no es actualizable vía PUTIX. Estados permitidos: ${PUTIX_SYNC_STATUSES.join(', ')}`,
+      code: 'TICKET_NOT_SYNCABLE',
+    };
+  }
+
+  const validationErrors = [];
+  const ignoredFields = { ticket: [], items: {} };
+
+  // ── Sanitize + validate ticket header ──
+  const { picked: ticketPatch, ignored: ticketIgnored } = pickAllowedFields(
+    ticketPatchRaw,
+    PUTIX_EDITABLE_TICKET_FIELDS
+  );
+  ignoredFields.ticket = ticketIgnored;
+  validationErrors.push(...validateEnumFields(ticketPatch, WRITE_BACK_ENUMS.ticket, 'ticket.'));
+
+  // ── Sanitize + validate items ──
+  let existingItemIds = new Set();
+  if (itemsPatchRaw.length > 0) {
+    const { data: dbItems } = await supabaseAdmin
+      .from('ticket_items')
+      .select('id')
+      .eq('ticket_id', ticketId);
+    existingItemIds = new Set((dbItems || []).map((i) => i.id));
+  }
+
+  const itemUpdates = [];
+  for (let i = 0; i < itemsPatchRaw.length; i++) {
+    const raw = itemsPatchRaw[i];
+    const itemId = raw?.id;
+    if (!itemId) {
+      validationErrors.push(`items[${i}]: falta "id" del item`);
+      continue;
+    }
+    if (!existingItemIds.has(itemId)) {
+      validationErrors.push(`items[${i}]: el item "${itemId}" no pertenece a este ticket`);
+      continue;
+    }
+    const { picked, ignored } = pickAllowedFields(raw, PUTIX_EDITABLE_ITEM_FIELDS);
+    if (ignored.length > 0) ignoredFields.items[itemId] = ignored;
+    validationErrors.push(...validateEnumFields(picked, WRITE_BACK_ENUMS.item, `items[${i}].`));
+    if (Object.keys(picked).length > 0) itemUpdates.push({ id: itemId, patch: picked });
+  }
+
+  // ── Referential check: confirmed_alternative_id must belong to its item ──
+  const altChecks = itemUpdates.filter((u) => u.patch.confirmed_alternative_id);
+  if (altChecks.length > 0) {
+    const altIds = altChecks.map((u) => u.patch.confirmed_alternative_id);
+    const { data: alts } = await supabaseAdmin
+      .from('ticket_item_alternatives')
+      .select('id, ticket_item_id')
+      .in('id', altIds);
+    const altOwner = new Map((alts || []).map((a) => [a.id, a.ticket_item_id]));
+    for (const u of altChecks) {
+      if (altOwner.get(u.patch.confirmed_alternative_id) !== u.id) {
+        validationErrors.push(
+          `items: confirmed_alternative_id "${u.patch.confirmed_alternative_id}" no pertenece al item "${u.id}"`
+        );
+      }
+    }
+  }
+
+  if (validationErrors.length > 0) {
+    return {
+      ok: false,
+      statusCode: 400,
+      error: 'Errores de validación en la solicitud',
+      code: 'VALIDATION_ERROR',
+      validation_errors: validationErrors,
+      ignored_fields: ignoredFields,
+    };
+  }
+
+  // ── Apply ticket update (always touch the row so updated_at moves for polling) ──
+  const ticketUpdateData = { ...ticketPatch, updated_at: new Date().toISOString() };
+  if (serviceUserId) ticketUpdateData.updated_by = serviceUserId;
+  if (ticketPatch.status === 'closed' && current.status !== 'closed') {
+    ticketUpdateData.closed_at = new Date().toISOString();
+  }
+
+  const { error: tErr } = await supabaseAdmin
+    .from('tickets')
+    .update(ticketUpdateData)
+    .eq('id', ticketId);
+  if (tErr) throw tErr;
+
+  // ── Apply item updates ──
+  for (const { id, patch } of itemUpdates) {
+    const { error: iErr } = await supabaseAdmin
+      .from('ticket_items')
+      .update(patch)
+      .eq('id', id)
+      .eq('ticket_id', ticketId);
+    if (iErr) throw iErr;
+  }
+
+  // ── Audit log (best-effort; requires a real user id to satisfy FK) ──
+  if (serviceUserId) {
+    supabaseAdmin
+      .from('audit_log')
+      .insert({
+        entity_type: 'ticket',
+        entity_id: ticketId,
+        action: 'update',
+        new_values: {
+          source: 'putix_writeback',
+          ticket: ticketPatch,
+          items: itemUpdates,
+        },
+        performed_by: serviceUserId,
+      })
+      .then(null, (e) => console.error('[PUTIX] audit log failed:', e.message));
+  }
+
+  const payload = await buildFullTicketPayload(ticketId, {
+    includeBlocks,
+    includeAttachmentUrls: false,
+  });
+
+  return {
+    ok: true,
+    statusCode: 200,
+    updated: {
+      ticket_fields: Object.keys(ticketPatch),
+      items_updated: itemUpdates.length,
+    },
+    ignored_fields: ignoredFields,
+    payload,
   };
 }

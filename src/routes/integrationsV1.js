@@ -16,6 +16,7 @@ import {
   getIntegrationStats,
   generateAllBlocks,
   loadItemsWithAlternatives,
+  updateTicketFromPutix,
 } from '../services/putixIntegration.js';
 import { supabaseAdmin } from '../config/supabase.js';
 
@@ -100,6 +101,40 @@ router.get('/tickets/:id/blocks', requirePutixApiKey, asyncRoute(async (req, res
     blocks: generateAllBlocks(ticket, items, forwardingLog || []),
   });
 }));
+
+/**
+ * Write-back: PUTIX updates a ticket header (cabecera) and/or its items (detalle).
+ *
+ * Body: { ticket?: {...editable fields}, items?: [{ id, ...editable fields }] }
+ *
+ * Only fields in the editable allow-lists are applied; PKs/FKs/identifiers are
+ * ignored and reported in `ignored_fields`. Only tickets in a syncable status
+ * (pending, pending_review, in_progress, ready) can be modified.
+ *
+ * PATCH and PUT are both accepted (partial update semantics either way).
+ */
+const writeBackHandler = asyncRoute(async (req, res) => {
+  const result = await updateTicketFromPutix(req.params.id, req.body, {
+    includeBlocks: req.query.include_blocks !== 'false',
+  });
+
+  if (!result.ok) {
+    const errorBody = { error: result.error, code: result.code };
+    if (result.validation_errors) errorBody.validation_errors = result.validation_errors;
+    if (result.ignored_fields) errorBody.ignored_fields = result.ignored_fields;
+    return res.status(result.statusCode).json(errorBody);
+  }
+
+  res.json({
+    api_version: PUTIX_API_VERSION,
+    updated: result.updated,
+    ignored_fields: result.ignored_fields,
+    ticket: result.payload,
+  });
+});
+
+router.patch('/tickets/:id', requirePutixApiKey, writeBackHandler);
+router.put('/tickets/:id', requirePutixApiKey, writeBackHandler);
 
 router.get('/admin/dashboard', requireAdminDashboard, asyncRoute(async (req, res) => {
   const stats = await getIntegrationStats();

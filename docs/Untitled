@@ -1,0 +1,8 @@
+New write-back endpoint is live: PATCH /api/integrations/v1/tickets/:id (also accepts PUT), header X-API-Key. Body has optional ticket (cabecera) and items (detalle, each needs the item id).
+Field contract is self-service: the full editable field lists, enums, and a body example are now in GET /api/integrations/v1/schema under write_back — they should code against that, not a hardcoded list.
+Non-editable fields are ignored, not errors: PKs/FKs/identifiers they send are dropped and returned in ignored_fields so they can see what was skipped.
+Writes are only allowed for the 4 sync states (pending, pending_review, in_progress, ready). Updating a closed/pedido/cancelled ticket returns 409 TICKET_NOT_SYNCABLE.
+Item add/delete is out of scope for v1 write-back — it only updates existing items by id. If they need to add/remove line items, that's a follow-up.
+Closed-ticket history: use GET /tickets?status=closed&sort_order=asc&limit=100 and paginate; created_since is available for incremental backfill. (Full detail per ticket via GET /tickets/:id.)
+One decision to confirm with them: I allowed status to be one of the editable header fields (so they can advance a ticket's stage), validating only the enum — I do not enforce Mini Web's internal role-based transition rules on this path. Please confirm whether PUTIX should be allowed to change status, or whether it should be read-only for them (easy to remove from the allow-list if so).
+Their 24h look-back polling stays exactly as-is; nothing changes on their sync side.
