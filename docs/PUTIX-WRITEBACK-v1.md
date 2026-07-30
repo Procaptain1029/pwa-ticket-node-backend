@@ -109,7 +109,7 @@ Response:
 
 `status`, `priority`, `length_class`, `vin`, `vehicle_info`, `seller_notes`, `block_notes`,
 `notes`, `is_venta_concreta`, `conversion_status`, `duplicate_label`, `sender_name`,
-`sender_phone`, `client_phone`.
+`sender_phone`, `client_phone`, `assigned_to` (uuid de usuario Mini Web activo, o `null`).
 
 ### 5.2 Detalle (`items[]`, requiere `id`)
 

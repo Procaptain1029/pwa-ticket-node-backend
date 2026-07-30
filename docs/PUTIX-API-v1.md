@@ -59,6 +59,8 @@ Resumen:
 | GET | `/tickets/:id/blocks` | Bloques de texto generados |
 | PATCH | `/tickets/:id` | **Write‑back**: actualiza cabecera y/o detalle |
 | PUT | `/tickets/:id` | Alias de PATCH |
+| GET | `/users` | Catálogo de usuarios Mini Web (para asignar en PUTIX) |
+| GET | `/users/:id` | Detalle de un usuario |
 
 ---
 
@@ -246,6 +248,24 @@ GET /tickets?status=closed&sort_order=asc&created_since=2025-01-01T00:00:00Z&lim
 ```
 
 El detalle completo de cada uno se obtiene con `GET /tickets/:id`.
+
+---
+
+## 7bis. Sincronización de usuarios
+
+Para asignar responsables al tomar un ticket en PUTIX, sincronizar el catálogo:
+
+```
+GET /users?is_active=true&updated_since=<lastSync>
+```
+
+Luego asignar con write-back:
+
+```json
+{ "ticket": { "assigned_to": "<user-uuid>", "status": "in_progress" } }
+```
+
+Documentación completa: `PUTIX-USERS-SYNC-v1.md`.
 
 ---
 

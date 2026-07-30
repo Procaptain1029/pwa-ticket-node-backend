@@ -17,6 +17,8 @@ import {
   generateAllBlocks,
   loadItemsWithAlternatives,
   updateTicketFromPutix,
+  listUsersForPutix,
+  getUserForPutix,
 } from '../services/putixIntegration.js';
 import { supabaseAdmin } from '../config/supabase.js';
 
@@ -54,9 +56,22 @@ router.get('/health', requirePutixApiKey, asyncRoute(async (req, res) => {
       strategy: 'polling',
       delta_param: 'updated_since',
       recommended_interval_seconds: 60,
+      resources: ['tickets', 'users'],
     },
     stats,
   });
+}));
+
+router.get('/users', requirePutixApiKey, asyncRoute(async (req, res) => {
+  res.json(await listUsersForPutix(req.query));
+}));
+
+router.get('/users/:id', requirePutixApiKey, asyncRoute(async (req, res) => {
+  const payload = await getUserForPutix(req.params.id);
+  if (!payload) {
+    return res.status(404).json({ error: 'User not found', code: 'NOT_FOUND' });
+  }
+  res.json(payload);
 }));
 
 router.get('/tickets', requirePutixApiKey, asyncRoute(async (req, res) => {
@@ -154,6 +169,7 @@ router.get('/admin/dashboard', requireAdminDashboard, asyncRoute(async (req, res
     schema_summary: {
       ticket_field_count: Object.keys(PUTIX_SCHEMA.ticket_fields).length,
       item_field_count: Object.keys(PUTIX_SCHEMA.item_fields).length,
+      user_field_count: Object.keys(PUTIX_SCHEMA.user_fields).length,
       enums: PUTIX_SCHEMA.enums,
     },
     sample_payload: buildSampleTicketPayload(),

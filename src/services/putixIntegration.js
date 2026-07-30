@@ -50,6 +50,9 @@ export const PUTIX_EDITABLE_TICKET_FIELDS = [
   'sender_name',
   'sender_phone',
   'client_phone',
+  // Exception to the "no FKs" rule: PUTIX assigns Mini Web users when taking a ticket.
+  // Validated against users table (must exist + is_active).
+  'assigned_to',
 ];
 
 /** Allow-list of ticket_item (detalle) fields PUTIX may update via write-back. */
@@ -108,8 +111,14 @@ export const PUTIX_PHASES = [
   {
     id: 'phase_5',
     name: 'Escritura (write-back)',
-    description: 'PATCH /tickets/:id: PUTIX actualiza cabecera y detalle (campos editables, excepto PK/FK/identificadores). Solo tickets en estados sincronizables.',
-    status: 'in_progress',
+    description: 'PATCH /tickets/:id: PUTIX actualiza cabecera y detalle (campos editables). Incluye assigned_to para tomar el ticket.',
+    status: 'completed',
+  },
+  {
+    id: 'phase_6',
+    name: 'Sincronización de usuarios',
+    description: 'GET /users: catálogo de usuarios Mini Web para que PUTIX asigne responsables al tomar tickets.',
+    status: 'completed',
   },
 ];
 
@@ -118,7 +127,9 @@ export const PUTIX_ENDPOINTS = [
   { method: 'GET', path: '/api/integrations/v1/tickets', auth: 'X-API-Key', description: 'Listado paginado con filtros: status, updated_since, created_since. Para histórico usar status=closed' },
   { method: 'GET', path: '/api/integrations/v1/tickets/:id', auth: 'X-API-Key', description: 'Ticket completo: ítems, alternativas, usuarios, SLA, extensiones' },
   { method: 'GET', path: '/api/integrations/v1/tickets/:id/blocks', auth: 'X-API-Key', description: 'Todos los bloques de texto generados (proforma, pedido, control, etc.)' },
-  { method: 'PATCH', path: '/api/integrations/v1/tickets/:id', auth: 'X-API-Key', description: 'Write-back: actualiza cabecera y detalle. Solo estados sincronizables. Campos no editables son ignorados' },
+  { method: 'PATCH', path: '/api/integrations/v1/tickets/:id', auth: 'X-API-Key', description: 'Write-back: actualiza cabecera y detalle (incluye assigned_to). Solo estados sincronizables' },
+  { method: 'GET', path: '/api/integrations/v1/users', auth: 'X-API-Key', description: 'Catálogo de usuarios Mini Web para sincronizar y asignar en PUTIX' },
+  { method: 'GET', path: '/api/integrations/v1/users/:id', auth: 'X-API-Key', description: 'Detalle de un usuario Mini Web' },
   { method: 'GET', path: '/api/integrations/v1/health', auth: 'X-API-Key', description: 'Health check y estadísticas de sincronización' },
   { method: 'POST', path: '/api/integrations/c0-import', auth: 'X-API-Key', description: 'Legacy: importación masiva C0 histórica (opcional)' },
 ];
@@ -231,27 +242,43 @@ export const PUTIX_SCHEMA = {
     url: 'string — URL firmada (1h), opcional en detalle',
     created_at: 'timestamp',
   },
+  user_fields: {
+    id: 'uuid — usar este valor en ticket.assigned_to',
+    email: 'string',
+    full_name: 'string',
+    role: 'enum user_role',
+    is_active: 'boolean — sincronizar solo activos recomendado',
+    avatar_url: 'string | null',
+    created_at: 'timestamp',
+    updated_at: 'timestamp — usar para polling updated_since',
+  },
   sync: {
     strategy: 'polling',
     recommended_interval_seconds: 60,
-    delta_filter: 'updated_since (ISO-8601) en GET /tickets',
+    delta_filter: 'updated_since (ISO-8601) en GET /tickets y GET /users',
     lookback_window: 'PUTIX usa lastSyncAt = ahora - 24h para no perder cambios entre ciclos',
     syncable_statuses: ['pending', 'pending_review', 'in_progress', 'ready'],
     closed_history: 'Para el histórico interno de PUTIX: GET /tickets?status=closed&sort_order=asc (opcional created_since para backfill incremental)',
-    note: 'Mini Web es la fuente de verdad para proforma; PUTIX lee y refleja en sus pantallas.',
+    users: 'GET /users?is_active=true&updated_since=... — catálogo para asignar responsables en PUTIX',
+    note: 'Mini Web es la fuente de verdad para proforma y usuarios; PUTIX lee y refleja en sus pantallas.',
   },
   write_back: {
     endpoint: 'PATCH /api/integrations/v1/tickets/:id',
-    description: 'PUTIX actualiza cabecera (ticket) y detalle (items). Modelo allow-list: solo se aplican los campos editables; cualquier PK/FK/identificador enviado se ignora y se reporta en ignored_fields.',
+    description: 'PUTIX actualiza cabecera (ticket) y detalle (items). Modelo allow-list: solo se aplican los campos editables; cualquier PK/FK/identificador no permitido se ignora y se reporta en ignored_fields.',
     only_syncable_statuses: true,
     body_example: {
-      ticket: { status: 'ready', seller_notes: 'Confirmado por PUTIX', vehicle_info: { marca: 'CHEVROLET' } },
+      ticket: {
+        status: 'in_progress',
+        assigned_to: '<uuid-usuario-miniweb>',
+        seller_notes: 'Tomado desde PUTIX',
+        vehicle_info: { marca: 'CHEVROLET' },
+      },
       items: [{ id: '<uuid-item>', selling_price: 18.5, supplier_code: 'IMP-001', status: 'positive' }],
     },
     editable_ticket_fields: PUTIX_EDITABLE_TICKET_FIELDS,
     editable_item_fields: PUTIX_EDITABLE_ITEM_FIELDS,
-    non_editable: 'id, k_number, group_code, raw_text, putix_ref, *_ticket_id, assigned_to, created_by/updated_by, created_at/updated_at, sla_*, lock_* y demás identificadores de integridad',
-    note: 'No agrega ni elimina items (solo actualiza los existentes por id). updated_at se refresca para que el polling refleje el cambio.',
+    non_editable: 'id, k_number, group_code, raw_text, putix_ref, *_ticket_id, created_by/updated_by, created_at/updated_at, sla_*, lock_* y demás identificadores de integridad',
+    note: 'No agrega ni elimina items (solo actualiza los existentes por id). assigned_to debe ser un users.id activo de Mini Web (o null para desasignar). Al asignar se setea assigned_at automáticamente.',
   },
 };
 
@@ -608,6 +635,7 @@ export async function getIntegrationStats() {
     { count: pedidoCount },
     { count: inProgressCount },
     { count: putixC0Count },
+    { count: activeUsers },
   ] = await Promise.all([
     supabaseAdmin.from('tickets').select('id', { count: 'exact', head: true }).eq('is_merged', false),
     supabaseAdmin.from('tickets').select('id', { count: 'exact', head: true }).gte('updated_at', dayAgo.toISOString()),
@@ -615,6 +643,7 @@ export async function getIntegrationStats() {
     supabaseAdmin.from('tickets').select('id', { count: 'exact', head: true }).eq('status', 'pedido'),
     supabaseAdmin.from('tickets').select('id', { count: 'exact', head: true }).eq('status', 'in_progress'),
     supabaseAdmin.from('tickets').select('id', { count: 'exact', head: true }).eq('entry_type', 'putix_c0'),
+    supabaseAdmin.from('users').select('id', { count: 'exact', head: true }).eq('is_active', true),
   ]);
 
   const { data: latestTicket } = await supabaseAdmin
@@ -634,10 +663,97 @@ export async function getIntegrationStats() {
       pedido: pedidoCount || 0,
     },
     putix_c0_imported: putixC0Count || 0,
+    active_users: activeUsers || 0,
     latest_ticket: latestTicket || null,
     server_time: now.toISOString(),
   };
 }
+
+/**
+ * List Mini Web users for PUTIX sync (assign sellers / operators in PUTIX UI).
+ * Supports the same polling pattern as tickets via updated_since.
+ */
+export async function listUsersForPutix(filters = {}) {
+  const {
+    page = 1,
+    limit = 100,
+    role,
+    is_active = 'true',
+    updated_since,
+    email,
+    sort_order = 'asc',
+  } = filters;
+
+  const pageNum = Math.max(1, parseInt(page, 10) || 1);
+  const limitNum = Math.min(200, Math.max(1, parseInt(limit, 10) || 100));
+  const offset = (pageNum - 1) * limitNum;
+
+  let query = supabaseAdmin
+    .from('users')
+    .select('id, email, full_name, role, is_active, avatar_url, created_at, updated_at', { count: 'exact' });
+
+  if (is_active === 'true' || is_active === true) {
+    query = query.eq('is_active', true);
+  } else if (is_active === 'false' || is_active === false) {
+    query = query.eq('is_active', false);
+  }
+  // is_active=all → no filter
+
+  if (role) {
+    if (String(role).includes(',')) {
+      query = query.in('role', String(role).split(',').map((r) => r.trim()).filter(Boolean));
+    } else {
+      query = query.eq('role', role);
+    }
+  }
+  if (email) query = query.ilike('email', `%${email}%`);
+  if (updated_since) query = query.gte('updated_at', updated_since);
+
+  query = query
+    .order('updated_at', { ascending: sort_order === 'asc' })
+    .order('full_name', { ascending: true })
+    .range(offset, offset + limitNum - 1);
+
+  const { data, error, count } = await query;
+  if (error) throw error;
+
+  return {
+    api_version: PUTIX_API_VERSION,
+    users: data || [],
+    pagination: {
+      page: pageNum,
+      limit: limitNum,
+      total: count || 0,
+      total_pages: Math.ceil((count || 0) / limitNum),
+    },
+    filters_applied: {
+      role: role || null,
+      is_active: is_active === 'all' ? 'all' : (is_active === 'false' || is_active === false ? false : true),
+      updated_since: updated_since || null,
+      email: email || null,
+    },
+  };
+}
+
+export async function getUserForPutix(userId) {
+  const { data, error } = await supabaseAdmin
+    .from('users')
+    .select('id, email, full_name, role, is_active, avatar_url, created_at, updated_at')
+    .eq('id', userId)
+    .single();
+
+  if (error) {
+    if (error.code === 'PGRST116') return null;
+    throw error;
+  }
+
+  return {
+    api_version: PUTIX_API_VERSION,
+    user: data,
+  };
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // ─── PUTIX write-back (v1 phase 5) ───────────────────────────────────────────
 
@@ -712,7 +828,7 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
   // ── Load current ticket ──
   const { data: current, error: loadErr } = await supabaseAdmin
     .from('tickets')
-    .select('id, status')
+    .select('id, status, assigned_to')
     .eq('id', ticketId)
     .single();
 
@@ -743,6 +859,29 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
   ignoredFields.ticket = ticketIgnored;
   validationErrors.push(...validateEnumFields(ticketPatch, WRITE_BACK_ENUMS.ticket, 'ticket.'));
 
+  // ── Validate assigned_to (Mini Web user id) ──
+  if ('assigned_to' in ticketPatch) {
+    const assigneeId = ticketPatch.assigned_to;
+    if (assigneeId === null || assigneeId === '') {
+      ticketPatch.assigned_to = null;
+      ticketPatch.assigned_at = null;
+    } else if (typeof assigneeId !== 'string' || !UUID_RE.test(assigneeId)) {
+      validationErrors.push('ticket.assigned_to: debe ser un UUID válido de usuario Mini Web, o null');
+    } else {
+      const { data: assignee } = await supabaseAdmin
+        .from('users')
+        .select('id, is_active, role, full_name')
+        .eq('id', assigneeId)
+        .maybeSingle();
+      if (!assignee) {
+        validationErrors.push(`ticket.assigned_to: usuario "${assigneeId}" no existe en Mini Web`);
+      } else if (!assignee.is_active) {
+        validationErrors.push(`ticket.assigned_to: usuario "${assignee.full_name}" está inactivo`);
+      } else if (assigneeId !== current.assigned_to) {
+        ticketPatch.assigned_at = new Date().toISOString();
+      }
+    }
+  }
   // ── Sanitize + validate items ──
   let existingItemIds = new Set();
   if (itemsPatchRaw.length > 0) {
