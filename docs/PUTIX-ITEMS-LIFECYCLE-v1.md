@@ -116,6 +116,13 @@ Ejemplo:
 
 ---
 
+## Alternativas
+
+El write-back acepta `alternatives[]` dentro de cada ítem (replace semantics).
+Ver `PUTIX-ALTERNATIVES-WRITEBACK-v1.md`.
+
+---
+
 ## 5. Ejemplo cURL
 
 ```bash
@@ -129,8 +136,17 @@ curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   }' \
   "$BASE/api/integrations/v1/tickets/<TICKET_ID>"
 
-# En pedido: solo excluir
+# Alternativas (replace)
 curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
-  -d '{ "items": [ { "id": "<ITEM_ID>", "pedido_excluded": true } ] }' \
+  -d '{
+    "items": [{
+      "id": "<ITEM_ID>",
+      "alternatives": [
+        { "client_ref": "alt-1", "brand": "WIX", "selling_price": 15.0 },
+        { "client_ref": "alt-2", "brand": "MANN", "selling_price": 18.5 }
+      ],
+      "confirmed_alternative_client_ref": "alt-2"
+    }]
+  }' \
   "$BASE/api/integrations/v1/tickets/<TICKET_ID>"
 ```

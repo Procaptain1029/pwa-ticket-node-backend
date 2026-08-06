@@ -290,6 +290,7 @@ export const PUTIX_SCHEMA = {
       delete: 'ítem con id + _delete:true. Solo in_progress. Respuesta: items_deleted[id]',
       exclude: 'ítem con id + pedido_excluded:true. Permitido en in_progress y pedido (en pedido es la única baja).',
       update: 'ítem con id y campos editables. Permitido en estados sincronizables; en pedido solo pedido_excluded',
+      alternatives: 'array en el ítem (replace semantics). brand requerido. Opcional client_ref por alternativa. Respuesta: alternatives_updated[{item_id, alternatives:[{client_ref,id}]}]. Vaciar con []. Confirmación opcional: confirmed_alternative_client_ref',
     },
     body_example: {
       ticket: {
@@ -298,7 +299,15 @@ export const PUTIX_SCHEMA = {
         seller_notes: 'Tomado desde PUTIX',
       },
       items: [
-        { id: '<uuid-existente>', selling_price: 18.5 },
+        {
+          id: '<uuid-existente>',
+          selling_price: 18.5,
+          alternatives: [
+            { client_ref: 'alt-1', brand: 'WIX', selling_price: 15.0, cost_price: 10.0 },
+            { client_ref: 'alt-2', brand: 'MANN', selling_price: 18.5 },
+          ],
+          confirmed_alternative_client_ref: 'alt-2',
+        },
         { client_ref: 'tmp-1', parsed_description: 'Filtro de aceite', quantity: 1 },
         { id: '<uuid-a-eliminar>', _delete: true },
         { id: '<uuid-a-excluir>', pedido_excluded: true },
@@ -307,7 +316,7 @@ export const PUTIX_SCHEMA = {
     editable_ticket_fields: PUTIX_EDITABLE_TICKET_FIELDS,
     editable_item_fields: PUTIX_EDITABLE_ITEM_FIELDS,
     non_editable: 'id, k_number, group_code, raw_text, putix_ref, *_ticket_id, created_by/updated_by, created_at/updated_at, sla_*, lock_* y demás identificadores de integridad',
-    note: 'assigned_to aplica Tomar (lock+SLA). client_ref y _delete son metadatos de control (no columnas). Al crear se regeneran item_count/length_class.',
+    note: 'assigned_to aplica Tomar (lock+SLA). client_ref, _delete, alternatives y confirmed_alternative_client_ref son metadatos de control. Al reemplazar alternatives se resetea la confirmación previa salvo confirmed_alternative_client_ref.',
   },
 };
 
@@ -847,6 +856,101 @@ function classifyLengthClass(itemCount) {
   return 'long';
 }
 
+const PUTIX_ALT_EDITABLE_FIELDS = [
+  'brand',
+  'selling_price',
+  'cost_price',
+  'source',
+  'supplier_code',
+  'estimated_delivery',
+  'notes',
+];
+
+/**
+ * Normalize alternatives[] from a PUTIX item payload.
+ * Replace semantics: the full array replaces the previous set for that item.
+ * Returns { errors, rows } where rows are ready for insert (+ client_ref for response).
+ */
+function normalizePutixAlternatives(rawAlts, prefix) {
+  const errors = [];
+  if (!Array.isArray(rawAlts)) {
+    errors.push(`${prefix}.alternatives: debe ser un array`);
+    return { errors, rows: [] };
+  }
+
+  const rows = [];
+  for (let j = 0; j < rawAlts.length; j++) {
+    const alt = rawAlts[j] || {};
+    const altPrefix = `${prefix}.alternatives[${j}]`;
+    const clientRef = alt.client_ref != null ? String(alt.client_ref) : null;
+
+    if (alt._delete === true) {
+      errors.push(`${altPrefix}: _delete en alternatives no está soportado; envíe el array completo a reemplazar (o [] para vaciar)`);
+      continue;
+    }
+
+    const brand = typeof alt.brand === 'string' ? alt.brand.trim() : '';
+    if (!brand) {
+      errors.push(`${altPrefix}: "brand" es requerido`);
+      continue;
+    }
+
+    if (alt.source != null && alt.source !== undefined && !PUTIX_SCHEMA.enums.item_source.includes(alt.source)) {
+      errors.push(`${altPrefix}.source: valor no válido "${alt.source}"`);
+      continue;
+    }
+
+    // Ignore unknown keys except control metadata
+    for (const key of Object.keys(alt)) {
+      if (['client_ref', 'id', '_delete', ...PUTIX_ALT_EDITABLE_FIELDS].includes(key)) continue;
+      // silently ignore unknown alt keys (reported at item level if needed)
+    }
+
+    rows.push({
+      client_ref: clientRef,
+      row: {
+        brand,
+        selling_price: alt.selling_price != null ? alt.selling_price : null,
+        cost_price: alt.cost_price != null ? alt.cost_price : null,
+        source: alt.source ?? null,
+        supplier_code: alt.supplier_code ?? null,
+        estimated_delivery: alt.estimated_delivery ?? null,
+        notes: alt.notes ?? alt.note ?? null,
+      },
+    });
+  }
+
+  return { errors, rows };
+}
+
+async function replaceItemAlternatives(itemId, altRows) {
+  const { error: delErr } = await supabaseAdmin
+    .from('ticket_item_alternatives')
+    .delete()
+    .eq('ticket_item_id', itemId);
+  if (delErr) throw delErr;
+
+  if (!altRows.length) return [];
+
+  const insertPayload = altRows.map((a) => ({
+    ticket_item_id: itemId,
+    ...a.row,
+  }));
+
+  const { data: created, error: insErr } = await supabaseAdmin
+    .from('ticket_item_alternatives')
+    .insert(insertPayload)
+    .select('id, brand, selling_price, cost_price, source, supplier_code, estimated_delivery, notes');
+  if (insErr) throw insErr;
+
+  // Correlate by insert order (PostgREST returns rows in insert order for multi-insert)
+  return (created || []).map((row, idx) => ({
+    client_ref: altRows[idx]?.client_ref ?? null,
+    id: row.id,
+    brand: row.brand,
+  }));
+}
+
 /**
  * Apply a PUTIX write-back to a ticket (header) and/or its items (detail).
  *
@@ -994,6 +1098,8 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
   const itemCreates = [];
   const itemDeletes = [];
   const itemExcludedIds = [];
+  // Pending alternative replacements: { itemId? createIndex?, alternatives: normalized rows }
+  const alternativeReplacements = [];
 
   for (let i = 0; i < itemsPatchRaw.length; i++) {
     const raw = itemsPatchRaw[i] || {};
@@ -1001,6 +1107,7 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
     const wantsDelete = raw._delete === true;
     const itemId = raw.id;
     const clientRef = raw.client_ref != null ? String(raw.client_ref) : null;
+    const hasAlternativesKey = Object.prototype.hasOwnProperty.call(raw, 'alternatives');
 
     // ── DELETE ──
     if (wantsDelete) {
@@ -1032,8 +1139,7 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
       }
 
       const { picked, ignored } = pickAllowedFields(raw, PUTIX_EDITABLE_ITEM_FIELDS);
-      // client_ref / _delete / raw_line are control or create-input aliases, not ignored mistakes
-      const ignoredDb = ignored.filter((k) => !['client_ref', '_delete', 'raw_line'].includes(k));
+      const ignoredDb = ignored.filter((k) => !['client_ref', '_delete', 'raw_line', 'alternatives', 'confirmed_alternative_client_ref'].includes(k));
       if (ignoredDb.length > 0) ignoredFields.items[clientRef || `new_${i}`] = ignoredDb;
       validationErrors.push(...validateEnumFields(picked, WRITE_BACK_ENUMS.item, `${prefix}.`));
 
@@ -1045,10 +1151,28 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
         continue;
       }
 
+      let createAlts = null;
+      let createConfirmRef = null;
+      if (hasAlternativesKey) {
+        const normalized = normalizePutixAlternatives(raw.alternatives, prefix);
+        validationErrors.push(...normalized.errors);
+        createAlts = normalized.rows;
+        if (raw.confirmed_alternative_client_ref != null) {
+          createConfirmRef = String(raw.confirmed_alternative_client_ref);
+        }
+        // Don't persist a confirmed_alternative_id on insert — ids don't exist yet
+        picked.confirmed_alternative_id = null;
+        picked.alternative_confirmed = false;
+      }
+
       maxOrder += 1;
+      const createIndex = itemCreates.length;
       itemCreates.push({
         client_ref: clientRef,
         index: i,
+        createIndex,
+        alternatives: createAlts,
+        confirm_client_ref: createConfirmRef,
         row: {
           ticket_id: ticketId,
           item_order: picked.item_order != null ? picked.item_order : maxOrder,
@@ -1090,14 +1214,39 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
     }
 
     const { picked, ignored } = pickAllowedFields(raw, PUTIX_EDITABLE_ITEM_FIELDS);
-    const ignoredDb = ignored.filter((k) => k !== 'client_ref' && k !== '_delete');
+    const ignoredDb = ignored.filter((k) => !['client_ref', '_delete', 'alternatives', 'confirmed_alternative_client_ref'].includes(k));
     if (ignoredDb.length > 0) ignoredFields.items[itemId] = ignoredDb;
     validationErrors.push(...validateEnumFields(picked, WRITE_BACK_ENUMS.item, `${prefix}.`));
 
-    if (Object.keys(picked).length === 0) continue;
+    let updateAlts = undefined;
+    if (hasAlternativesKey) {
+      if (!PUTIX_SYNC_STATUSES.includes(effectiveStatus)) {
+        validationErrors.push(
+          `${prefix}: alternatives solo se puede actualizar en estados sincronizables (actual: ${effectiveStatus})`
+        );
+      } else {
+        const normalized = normalizePutixAlternatives(raw.alternatives, prefix);
+        validationErrors.push(...normalized.errors);
+        updateAlts = normalized.rows;
+        // Replacing alternatives drops old ids — confirmation must be re-set after
+        // using returned alternative ids, or via confirmed_alternative_client_ref.
+        picked.alternative_confirmed = false;
+        picked.confirmed_alternative_id = null;
+        const confirmRef = raw.confirmed_alternative_client_ref != null
+          ? String(raw.confirmed_alternative_client_ref)
+          : null;
+        if (confirmRef) {
+          // Stash on the replacement record after we push it
+          raw.__confirm_alt_client_ref = confirmRef;
+        }
+      }
+    }
+
+    if (Object.keys(picked).length === 0 && updateAlts === undefined) continue;
 
     const hasExclude = Object.prototype.hasOwnProperty.call(picked, 'pedido_excluded');
     const otherFields = Object.keys(picked).filter((k) => k !== 'pedido_excluded');
+    const hasAltReplace = updateAlts !== undefined;
 
     if (hasExclude && !PUTIX_ITEM_EXCLUDE_STATUSES.includes(effectiveStatus)) {
       validationErrors.push(
@@ -1106,14 +1255,14 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
       continue;
     }
 
-    if (effectiveStatus === 'pedido' && otherFields.length > 0) {
+    if (effectiveStatus === 'pedido' && (otherFields.length > 0 || hasAltReplace)) {
       validationErrors.push(
         `${prefix}: en estado "pedido" solo se permite pedido_excluded (no otras actualizaciones de ítem)`
       );
       continue;
     }
 
-    if (otherFields.length > 0 && !PUTIX_SYNC_STATUSES.includes(effectiveStatus)) {
+    if ((otherFields.length > 0 || hasAltReplace) && !PUTIX_SYNC_STATUSES.includes(effectiveStatus)) {
       validationErrors.push(
         `${prefix}: actualizar campos del ítem no está permitido en estado "${effectiveStatus}"`
       );
@@ -1124,7 +1273,17 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
       itemExcludedIds.push(itemId);
     }
 
-    itemUpdates.push({ id: itemId, patch: picked });
+    if (Object.keys(picked).length > 0) {
+      itemUpdates.push({ id: itemId, patch: picked });
+    }
+    if (hasAltReplace) {
+      alternativeReplacements.push({
+        item_id: itemId,
+        alternatives: updateAlts,
+        source: 'update',
+        confirm_client_ref: raw.__confirm_alt_client_ref || null,
+      });
+    }
   }
 
   // ── Referential check: confirmed_alternative_id must belong to its item ──
@@ -1203,6 +1362,46 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
       id: created.id,
       index: create.index,
     });
+    if (create.alternatives) {
+      alternativeReplacements.push({
+        item_id: created.id,
+        item_client_ref: create.client_ref,
+        alternatives: create.alternatives,
+        source: 'create',
+        confirm_client_ref: create.confirm_client_ref || null,
+      });
+    }
+  }
+
+  // ── Apply alternative replacements (replace semantics) ──
+  const alternativesUpdated = [];
+  for (const repl of alternativeReplacements) {
+    const createdAlts = await replaceItemAlternatives(repl.item_id, repl.alternatives);
+    alternativesUpdated.push({
+      item_id: repl.item_id,
+      item_client_ref: repl.item_client_ref ?? null,
+      alternatives: createdAlts,
+    });
+
+    if (repl.confirm_client_ref) {
+      const match = createdAlts.find((a) => a.client_ref === repl.confirm_client_ref);
+      if (!match) {
+        // Soft warning via console; already committed alts. Prefer not to fail mid-write.
+        console.warn(
+          `[PUTIX] confirmed_alternative_client_ref "${repl.confirm_client_ref}" no coincide con alternatives del item ${repl.item_id}`
+        );
+      } else {
+        const { error: confErr } = await supabaseAdmin
+          .from('ticket_items')
+          .update({
+            alternative_confirmed: true,
+            confirmed_alternative_id: match.id,
+          })
+          .eq('id', repl.item_id)
+          .eq('ticket_id', ticketId);
+        if (confErr) throw confErr;
+      }
+    }
   }
 
   // ── Sync item_count / length_class after create/delete ──
@@ -1236,6 +1435,7 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
           items_updated: itemUpdates,
           items_created: itemsCreated,
           items_deleted: itemDeletes,
+          alternatives_updated: alternativesUpdated,
         },
         performed_by: serviceUserId,
       })
@@ -1256,6 +1456,7 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
       items_created: itemsCreated,
       items_deleted: itemDeletes,
       items_excluded: itemExcludedIds,
+      alternatives_updated: alternativesUpdated,
       take_applied: takeApplied,
       release_applied: releaseApplied,
     },
