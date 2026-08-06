@@ -119,8 +119,13 @@ Content-Type: application/json
 ```
 
 - `assigned_to` debe ser un `users.id` **activo** de Mini Web.
-- Se setea `assigned_at` automáticamente si cambia el asignado.
-- Para desasignar: `"assigned_to": null`.
+- Mini Web aplica el mismo comportamiento que el botón **Tomar**:
+  - asigna (`assigned_to` + `assigned_at`)
+  - bloquea el ticket (`locked_by`, lock)
+  - inicia el SLA
+  - si el status era `pending` / `pending_review` / `en_revision`, pasa a `in_progress`
+- En la respuesta, `updated.take_applied: true` confirma que se aplicó Tomar.
+- Para desasignar: `"assigned_to": null` (también libera el lock).
 - Si el usuario no existe o está inactivo → `400 VALIDATION_ERROR`.
 
 ---

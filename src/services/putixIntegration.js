@@ -4,8 +4,11 @@
  */
 
 import { supabaseAdmin } from '../config/supabase.js';
-import { getSlaStatus } from './slaService.js';
-import { getCoincidenceCountsForTickets } from './duplicateService.js';
+import { getSlaStatus, calculateSlaDeadline } from './slaService.js';
+import {
+  getCoincidenceCountsForTickets,
+  getCoincidenceReferencesForTicket,
+} from './duplicateService.js';
 import { getAttachments, getAttachmentUrl } from './mediaProcessor.js';
 import {
   generateControlBlock,
@@ -27,8 +30,15 @@ export const PUTIX_API_VERSION = 'v1';
 /**
  * Ticket statuses PUTIX synchronizes / is allowed to write back to.
  * Maps to flujo.md: Pendiente, Pendiente de Revisión, En Proceso, Listo.
+ * `pedido` is also writable, but only for item exclusion (pedido_excluded).
  */
 export const PUTIX_SYNC_STATUSES = ['pending', 'pending_review', 'in_progress', 'ready'];
+export const PUTIX_WRITEABLE_STATUSES = [...PUTIX_SYNC_STATUSES, 'pedido'];
+
+/** Item create/delete only in assigned elaboration. */
+export const PUTIX_ITEM_CREATE_DELETE_STATUSES = ['in_progress'];
+/** Soft-exclude allowed in elaboration and pedido (reports keep history). */
+export const PUTIX_ITEM_EXCLUDE_STATUSES = ['in_progress', 'pedido'];
 
 /**
  * Allow-list of ticket header fields PUTIX may update via write-back.
@@ -127,7 +137,7 @@ export const PUTIX_ENDPOINTS = [
   { method: 'GET', path: '/api/integrations/v1/tickets', auth: 'X-API-Key', description: 'Listado paginado con filtros: status, updated_since, created_since. Para histórico usar status=closed' },
   { method: 'GET', path: '/api/integrations/v1/tickets/:id', auth: 'X-API-Key', description: 'Ticket completo: ítems, alternativas, usuarios, SLA, extensiones' },
   { method: 'GET', path: '/api/integrations/v1/tickets/:id/blocks', auth: 'X-API-Key', description: 'Todos los bloques de texto generados (proforma, pedido, control, etc.)' },
-  { method: 'PATCH', path: '/api/integrations/v1/tickets/:id', auth: 'X-API-Key', description: 'Write-back: actualiza cabecera y detalle (incluye assigned_to). Solo estados sincronizables' },
+  { method: 'PATCH', path: '/api/integrations/v1/tickets/:id', auth: 'X-API-Key', description: 'Write-back: cabecera + ítems (actualizar/crear/eliminar/excluir según estado). Incluye assigned_to=Tomar' },
   { method: 'GET', path: '/api/integrations/v1/users', auth: 'X-API-Key', description: 'Catálogo de usuarios Mini Web para sincronizar y asignar en PUTIX' },
   { method: 'GET', path: '/api/integrations/v1/users/:id', auth: 'X-API-Key', description: 'Detalle de un usuario Mini Web' },
   { method: 'GET', path: '/api/integrations/v1/health', auth: 'X-API-Key', description: 'Health check y estadísticas de sincronización' },
@@ -242,6 +252,15 @@ export const PUTIX_SCHEMA = {
     url: 'string — URL firmada (1h), opcional en detalle',
     created_at: 'timestamp',
   },
+  coincidence_fields: {
+    id: 'uuid — id del ticket coincidente',
+    k_number: 'string — #K del ticket coincidente',
+    status: 'enum ticket_status',
+    group_code: 'string',
+    created_at: 'timestamp',
+    similarity: 'number 0..1 | null',
+    label: 'enum duplicate_label | null',
+  },
   user_fields: {
     id: 'uuid — usar este valor en ticket.assigned_to',
     email: 'string',
@@ -264,21 +283,31 @@ export const PUTIX_SCHEMA = {
   },
   write_back: {
     endpoint: 'PATCH /api/integrations/v1/tickets/:id',
-    description: 'PUTIX actualiza cabecera (ticket) y detalle (items). Modelo allow-list: solo se aplican los campos editables; cualquier PK/FK/identificador no permitido se ignora y se reporta en ignored_fields.',
-    only_syncable_statuses: true,
+    description: 'PUTIX actualiza cabecera (ticket) y detalle (items). Modelo allow-list + ciclo de vida de ítems según estado.',
+    writable_statuses: PUTIX_WRITEABLE_STATUSES,
+    item_lifecycle: {
+      create: 'ítem sin id (opcional client_ref). Solo in_progress. Respuesta: items_created[{client_ref,id}]',
+      delete: 'ítem con id + _delete:true. Solo in_progress. Respuesta: items_deleted[id]',
+      exclude: 'ítem con id + pedido_excluded:true. Permitido en in_progress y pedido (en pedido es la única baja).',
+      update: 'ítem con id y campos editables. Permitido en estados sincronizables; en pedido solo pedido_excluded',
+    },
     body_example: {
       ticket: {
         status: 'in_progress',
         assigned_to: '<uuid-usuario-miniweb>',
         seller_notes: 'Tomado desde PUTIX',
-        vehicle_info: { marca: 'CHEVROLET' },
       },
-      items: [{ id: '<uuid-item>', selling_price: 18.5, supplier_code: 'IMP-001', status: 'positive' }],
+      items: [
+        { id: '<uuid-existente>', selling_price: 18.5 },
+        { client_ref: 'tmp-1', parsed_description: 'Filtro de aceite', quantity: 1 },
+        { id: '<uuid-a-eliminar>', _delete: true },
+        { id: '<uuid-a-excluir>', pedido_excluded: true },
+      ],
     },
     editable_ticket_fields: PUTIX_EDITABLE_TICKET_FIELDS,
     editable_item_fields: PUTIX_EDITABLE_ITEM_FIELDS,
     non_editable: 'id, k_number, group_code, raw_text, putix_ref, *_ticket_id, created_by/updated_by, created_at/updated_at, sla_*, lock_* y demás identificadores de integridad',
-    note: 'No agrega ni elimina items (solo actualiza los existentes por id). assigned_to debe ser un users.id activo de Mini Web (o null para desasignar). Al asignar se setea assigned_at automáticamente.',
+    note: 'assigned_to aplica Tomar (lock+SLA). client_ref y _delete son metadatos de control (no columnas). Al crear se regeneran item_count/length_class.',
   },
 };
 
@@ -297,6 +326,8 @@ export function buildSampleTicketPayload() {
       seller_notes: 'Cliente pide entrega rápida',
       assigned_to_user: { id: '...', email: 'vendedor@distrimia.com', full_name: 'Juan Pérez', role: 'seller' },
       sla: { status: 'completed', exceeded: false },
+      duplicate_label: 'dup_positive',
+      coincidence_count: 1,
       quote_total: 145.50,
       updated_at: '2025-06-25T14:30:00.000Z',
     },
@@ -334,6 +365,17 @@ export function buildSampleTicketPayload() {
     extensions: [],
     forwarding_log: [],
     attachments: [],
+    coincidences: [
+      {
+        id: '00000000-0000-0000-0000-000000000099',
+        k_number: 'K-20250620-0099',
+        status: 'closed',
+        group_code: 'GRP-042',
+        created_at: '2025-06-20T10:00:00.000Z',
+        similarity: 0.85,
+        label: 'dup_positive',
+      },
+    ],
     blocks_preview: {
       proforma_cliente: '...(texto generado)...',
       pedido_final: '...(texto generado)...',
@@ -485,7 +527,7 @@ export async function buildFullTicketPayload(ticketId, options = {}) {
   }
 
   const items = await loadItemsWithAlternatives(ticketId);
-  const coincidenceCounts = await getCoincidenceCountsForTickets([ticketId]);
+  const coincidences = await getCoincidenceReferencesForTicket(ticketId);
   const quote_total = await computeQuoteTotal(ticketId, items);
 
   const { data: extensions } = await supabaseAdmin
@@ -507,10 +549,11 @@ export async function buildFullTicketPayload(ticketId, options = {}) {
         exceeded: ticket.sla_exceeded,
         status: getSlaStatus(ticket),
       },
-      coincidence_count: coincidenceCounts[ticketId] || 0,
+      coincidence_count: coincidences.length,
       quote_total,
     },
     items,
+    coincidences,
     extensions: extensions || [],
     forwarding_log: forwardingLog,
     attachments,
@@ -798,12 +841,20 @@ function validateEnumFields(obj, enumMap, prefix = '') {
   return errors;
 }
 
+function classifyLengthClass(itemCount) {
+  if (itemCount <= 3) return 'short';
+  if (itemCount <= 8) return 'medium';
+  return 'long';
+}
+
 /**
  * Apply a PUTIX write-back to a ticket (header) and/or its items (detail).
  *
- * Security model: strict allow-list. Only fields in PUTIX_EDITABLE_TICKET_FIELDS /
- * PUTIX_EDITABLE_ITEM_FIELDS are applied; PKs, FKs and integrity identifiers are
- * ignored (and reported). Only tickets in PUTIX_SYNC_STATUSES can be written.
+ * Item lifecycle (confirmed with Distrimia):
+ * - create (no id): only in_progress
+ * - delete (_delete:true): only in_progress
+ * - exclude (pedido_excluded): in_progress or pedido
+ * - field updates: syncable statuses; in pedido only pedido_excluded
  *
  * @returns {{ ok: boolean, statusCode: number, ... }}
  */
@@ -828,7 +879,7 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
   // ── Load current ticket ──
   const { data: current, error: loadErr } = await supabaseAdmin
     .from('tickets')
-    .select('id, status, assigned_to')
+    .select('id, status, assigned_to, item_count, locked_by, lock_expires_at, sla_started_at')
     .eq('id', ticketId)
     .single();
 
@@ -839,17 +890,19 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
     throw loadErr;
   }
 
-  if (enforceSyncStatus && !PUTIX_SYNC_STATUSES.includes(current.status)) {
+  if (enforceSyncStatus && !PUTIX_WRITEABLE_STATUSES.includes(current.status)) {
     return {
       ok: false,
       statusCode: 409,
-      error: `El ticket está en estado "${current.status}" y no es actualizable vía PUTIX. Estados permitidos: ${PUTIX_SYNC_STATUSES.join(', ')}`,
+      error: `El ticket está en estado "${current.status}" y no es actualizable vía PUTIX. Estados permitidos: ${PUTIX_WRITEABLE_STATUSES.join(', ')}`,
       code: 'TICKET_NOT_SYNCABLE',
     };
   }
 
   const validationErrors = [];
   const ignoredFields = { ticket: [], items: {} };
+  let takeApplied = false;
+  let releaseApplied = false;
 
   // ── Sanitize + validate ticket header ──
   const { picked: ticketPatch, ignored: ticketIgnored } = pickAllowedFields(
@@ -859,12 +912,23 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
   ignoredFields.ticket = ticketIgnored;
   validationErrors.push(...validateEnumFields(ticketPatch, WRITE_BACK_ENUMS.ticket, 'ticket.'));
 
-  // ── Validate assigned_to (Mini Web user id) ──
+  // In pedido: header changes are not part of the confirmed item-lifecycle flow
+  if (current.status === 'pedido' && Object.keys(ticketPatch).length > 0) {
+    validationErrors.push(
+      'ticket: en estado "pedido" solo se permite excluir ítems (pedido_excluded); no se actualiza la cabecera'
+    );
+  }
+
+  // ── Validate assigned_to (Mini Web user id) + apply Tomar semantics ──
   if ('assigned_to' in ticketPatch) {
     const assigneeId = ticketPatch.assigned_to;
     if (assigneeId === null || assigneeId === '') {
       ticketPatch.assigned_to = null;
       ticketPatch.assigned_at = null;
+      ticketPatch.locked_by = null;
+      ticketPatch.locked_at = null;
+      ticketPatch.lock_expires_at = null;
+      releaseApplied = true;
     } else if (typeof assigneeId !== 'string' || !UUID_RE.test(assigneeId)) {
       validationErrors.push('ticket.assigned_to: debe ser un UUID válido de usuario Mini Web, o null');
     } else {
@@ -877,37 +941,190 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
         validationErrors.push(`ticket.assigned_to: usuario "${assigneeId}" no existe en Mini Web`);
       } else if (!assignee.is_active) {
         validationErrors.push(`ticket.assigned_to: usuario "${assignee.full_name}" está inactivo`);
-      } else if (assigneeId !== current.assigned_to) {
-        ticketPatch.assigned_at = new Date().toISOString();
+      } else {
+        const now = new Date();
+        const lockStillValid =
+          current.locked_by === assigneeId &&
+          current.lock_expires_at &&
+          new Date(current.lock_expires_at) > now;
+        const isNewAssignee = assigneeId !== current.assigned_to;
+
+        if (isNewAssignee || !lockStillValid) {
+          const LOCK_TIMEOUT = parseInt(process.env.LOCK_TIMEOUT_MINUTES || '10', 10);
+          const expiresAt = new Date(now.getTime() + LOCK_TIMEOUT * 60 * 1000);
+          const slaDeadline = calculateSlaDeadline(current.item_count || 1, now);
+
+          ticketPatch.assigned_at = now.toISOString();
+          ticketPatch.locked_by = assigneeId;
+          ticketPatch.locked_at = now.toISOString();
+          ticketPatch.lock_expires_at = expiresAt.toISOString();
+          ticketPatch.sla_started_at = now.toISOString();
+          ticketPatch.sla_deadline = slaDeadline.toISOString();
+          ticketPatch.sla_exceeded = false;
+          ticketPatch.sla_completed_at = null;
+
+          const statusBefore = ticketPatch.status || current.status;
+          if (['pending', 'pending_review', 'en_revision'].includes(statusBefore)) {
+            ticketPatch.status = 'in_progress';
+          }
+
+          takeApplied = true;
+        }
       }
     }
   }
-  // ── Sanitize + validate items ──
-  let existingItemIds = new Set();
+
+  // Effective status after header patch (e.g. take → in_progress in same request)
+  const effectiveStatus = ticketPatch.status || current.status;
+
+  // ── Load existing items ──
+  let existingItems = [];
   if (itemsPatchRaw.length > 0) {
     const { data: dbItems } = await supabaseAdmin
       .from('ticket_items')
-      .select('id')
-      .eq('ticket_id', ticketId);
-    existingItemIds = new Set((dbItems || []).map((i) => i.id));
+      .select('id, item_order')
+      .eq('ticket_id', ticketId)
+      .order('item_order', { ascending: true });
+    existingItems = dbItems || [];
   }
+  const existingItemIds = new Set(existingItems.map((i) => i.id));
+  let maxOrder = existingItems.reduce((max, i) => Math.max(max, i.item_order || 0), 0);
 
   const itemUpdates = [];
+  const itemCreates = [];
+  const itemDeletes = [];
+  const itemExcludedIds = [];
+
   for (let i = 0; i < itemsPatchRaw.length; i++) {
-    const raw = itemsPatchRaw[i];
-    const itemId = raw?.id;
+    const raw = itemsPatchRaw[i] || {};
+    const prefix = `items[${i}]`;
+    const wantsDelete = raw._delete === true;
+    const itemId = raw.id;
+    const clientRef = raw.client_ref != null ? String(raw.client_ref) : null;
+
+    // ── DELETE ──
+    if (wantsDelete) {
+      if (!itemId) {
+        validationErrors.push(`${prefix}: _delete requiere "id" del item`);
+        continue;
+      }
+      if (!existingItemIds.has(itemId)) {
+        validationErrors.push(`${prefix}: el item "${itemId}" no pertenece a este ticket`);
+        continue;
+      }
+      if (!PUTIX_ITEM_CREATE_DELETE_STATUSES.includes(effectiveStatus)) {
+        validationErrors.push(
+          `${prefix}: eliminar ítems solo está permitido en estado in_progress (actual: ${effectiveStatus})`
+        );
+        continue;
+      }
+      if (!itemDeletes.includes(itemId)) itemDeletes.push(itemId);
+      continue;
+    }
+
+    // ── CREATE (no id) ──
     if (!itemId) {
-      validationErrors.push(`items[${i}]: falta "id" del item`);
+      if (!PUTIX_ITEM_CREATE_DELETE_STATUSES.includes(effectiveStatus)) {
+        validationErrors.push(
+          `${prefix}: agregar ítems solo está permitido en estado in_progress (actual: ${effectiveStatus})`
+        );
+        continue;
+      }
+
+      const { picked, ignored } = pickAllowedFields(raw, PUTIX_EDITABLE_ITEM_FIELDS);
+      // client_ref / _delete / raw_line are control or create-input aliases, not ignored mistakes
+      const ignoredDb = ignored.filter((k) => !['client_ref', '_delete', 'raw_line'].includes(k));
+      if (ignoredDb.length > 0) ignoredFields.items[clientRef || `new_${i}`] = ignoredDb;
+      validationErrors.push(...validateEnumFields(picked, WRITE_BACK_ENUMS.item, `${prefix}.`));
+
+      const description = (picked.parsed_description || '').trim();
+      const rawLine = typeof raw.raw_line === 'string' ? raw.raw_line.trim() : '';
+      const finalDescription = description || rawLine;
+      if (!finalDescription) {
+        validationErrors.push(`${prefix}: para crear un ítem se requiere "parsed_description" (o raw_line)`);
+        continue;
+      }
+
+      maxOrder += 1;
+      itemCreates.push({
+        client_ref: clientRef,
+        index: i,
+        row: {
+          ticket_id: ticketId,
+          item_order: picked.item_order != null ? picked.item_order : maxOrder,
+          raw_line: rawLine || finalDescription,
+          parsed_description: finalDescription,
+          quantity: picked.quantity != null ? picked.quantity : 1,
+          status: picked.status || 'pending_info',
+          source: picked.source ?? null,
+          brand: picked.brand ?? null,
+          cost_price: picked.cost_price ?? null,
+          selling_price: picked.selling_price ?? null,
+          supplier_code: picked.supplier_code ?? null,
+          codigo_distrimia: picked.codigo_distrimia ?? null,
+          codigo_oem: picked.codigo_oem ?? null,
+          codigo_fabrica: picked.codigo_fabrica ?? null,
+          validity_status: picked.validity_status || 'vigente',
+          validity_expires_at: picked.validity_expires_at ?? null,
+          estimated_delivery: picked.estimated_delivery ?? null,
+          seller_note: picked.seller_note ?? null,
+          internal_note: picked.internal_note ?? null,
+          pedido_excluded: picked.pedido_excluded === true,
+          control_group: picked.control_group ?? null,
+          audit_code_type: picked.audit_code_type ?? null,
+          alternative_confirmed: picked.alternative_confirmed === true,
+          confirmed_alternative_id: picked.confirmed_alternative_id ?? null,
+        },
+      });
       continue;
     }
+
+    // ── UPDATE existing ──
     if (!existingItemIds.has(itemId)) {
-      validationErrors.push(`items[${i}]: el item "${itemId}" no pertenece a este ticket`);
+      validationErrors.push(`${prefix}: el item "${itemId}" no pertenece a este ticket`);
       continue;
     }
+    if (itemDeletes.includes(itemId)) {
+      validationErrors.push(`${prefix}: el item "${itemId}" también está marcado con _delete`);
+      continue;
+    }
+
     const { picked, ignored } = pickAllowedFields(raw, PUTIX_EDITABLE_ITEM_FIELDS);
-    if (ignored.length > 0) ignoredFields.items[itemId] = ignored;
-    validationErrors.push(...validateEnumFields(picked, WRITE_BACK_ENUMS.item, `items[${i}].`));
-    if (Object.keys(picked).length > 0) itemUpdates.push({ id: itemId, patch: picked });
+    const ignoredDb = ignored.filter((k) => k !== 'client_ref' && k !== '_delete');
+    if (ignoredDb.length > 0) ignoredFields.items[itemId] = ignoredDb;
+    validationErrors.push(...validateEnumFields(picked, WRITE_BACK_ENUMS.item, `${prefix}.`));
+
+    if (Object.keys(picked).length === 0) continue;
+
+    const hasExclude = Object.prototype.hasOwnProperty.call(picked, 'pedido_excluded');
+    const otherFields = Object.keys(picked).filter((k) => k !== 'pedido_excluded');
+
+    if (hasExclude && !PUTIX_ITEM_EXCLUDE_STATUSES.includes(effectiveStatus)) {
+      validationErrors.push(
+        `${prefix}: pedido_excluded solo está permitido en in_progress o pedido (actual: ${effectiveStatus})`
+      );
+      continue;
+    }
+
+    if (effectiveStatus === 'pedido' && otherFields.length > 0) {
+      validationErrors.push(
+        `${prefix}: en estado "pedido" solo se permite pedido_excluded (no otras actualizaciones de ítem)`
+      );
+      continue;
+    }
+
+    if (otherFields.length > 0 && !PUTIX_SYNC_STATUSES.includes(effectiveStatus)) {
+      validationErrors.push(
+        `${prefix}: actualizar campos del ítem no está permitido en estado "${effectiveStatus}"`
+      );
+      continue;
+    }
+
+    if (hasExclude && picked.pedido_excluded === true) {
+      itemExcludedIds.push(itemId);
+    }
+
+    itemUpdates.push({ id: itemId, patch: picked });
   }
 
   // ── Referential check: confirmed_alternative_id must belong to its item ──
@@ -928,6 +1145,12 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
     }
   }
 
+  // Cannot delete the last remaining item (after creates/deletes)
+  const remainingAfterDelete = existingItemIds.size - itemDeletes.length + itemCreates.length;
+  if (itemDeletes.length > 0 && remainingAfterDelete < 1) {
+    validationErrors.push('No se puede eliminar el único ítem del ticket (debe quedar al menos 1)');
+  }
+
   if (validationErrors.length > 0) {
     return {
       ok: false,
@@ -946,11 +1169,15 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
     ticketUpdateData.closed_at = new Date().toISOString();
   }
 
-  const { error: tErr } = await supabaseAdmin
-    .from('tickets')
-    .update(ticketUpdateData)
-    .eq('id', ticketId);
-  if (tErr) throw tErr;
+  // ── Apply deletes ──
+  for (const id of itemDeletes) {
+    const { error: dErr } = await supabaseAdmin
+      .from('ticket_items')
+      .delete()
+      .eq('id', id)
+      .eq('ticket_id', ticketId);
+    if (dErr) throw dErr;
+  }
 
   // ── Apply item updates ──
   for (const { id, patch } of itemUpdates) {
@@ -961,6 +1188,39 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
       .eq('ticket_id', ticketId);
     if (iErr) throw iErr;
   }
+
+  // ── Apply creates ──
+  const itemsCreated = [];
+  for (const create of itemCreates) {
+    const { data: created, error: cErr } = await supabaseAdmin
+      .from('ticket_items')
+      .insert(create.row)
+      .select('id')
+      .single();
+    if (cErr) throw cErr;
+    itemsCreated.push({
+      client_ref: create.client_ref,
+      id: created.id,
+      index: create.index,
+    });
+  }
+
+  // ── Sync item_count / length_class after create/delete ──
+  if (itemCreates.length > 0 || itemDeletes.length > 0) {
+    const { count: finalCount } = await supabaseAdmin
+      .from('ticket_items')
+      .select('id', { count: 'exact', head: true })
+      .eq('ticket_id', ticketId);
+    const newCount = finalCount || 0;
+    ticketUpdateData.item_count = newCount;
+    ticketUpdateData.length_class = classifyLengthClass(newCount);
+  }
+
+  const { error: tErr } = await supabaseAdmin
+    .from('tickets')
+    .update(ticketUpdateData)
+    .eq('id', ticketId);
+  if (tErr) throw tErr;
 
   // ── Audit log (best-effort; requires a real user id to satisfy FK) ──
   if (serviceUserId) {
@@ -973,7 +1233,9 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
         new_values: {
           source: 'putix_writeback',
           ticket: ticketPatch,
-          items: itemUpdates,
+          items_updated: itemUpdates,
+          items_created: itemsCreated,
+          items_deleted: itemDeletes,
         },
         performed_by: serviceUserId,
       })
@@ -991,6 +1253,11 @@ export async function updateTicketFromPutix(ticketId, body = {}, options = {}) {
     updated: {
       ticket_fields: Object.keys(ticketPatch),
       items_updated: itemUpdates.length,
+      items_created: itemsCreated,
+      items_deleted: itemDeletes,
+      items_excluded: itemExcludedIds,
+      take_applied: takeApplied,
+      release_applied: releaseApplied,
     },
     ignored_fields: ignoredFields,
     payload,

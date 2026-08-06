@@ -437,6 +437,41 @@ export async function getCoincidenceCountsForTickets(ticketIds) {
   return counts;
 }
 
+/**
+ * Return lightweight references to the tickets already linked as duplicates.
+ * Checks both directions because duplicate_references is directional, while the
+ * coincidence relationship exposed to clients is not.
+ */
+export async function getCoincidenceReferencesForTicket(ticketId) {
+  const { ids, meta } = await getStoredCandidateIds(ticketId);
+  const candidateIds = ids.filter(id => id !== ticketId);
+
+  if (candidateIds.length === 0) return [];
+
+  const { data, error } = await supabaseAdmin
+    .from('tickets')
+    .select('id, k_number, status, group_code, created_at')
+    .in('id', candidateIds);
+
+  if (error) throw error;
+
+  return (data || [])
+    .map(ticket => ({
+      id: ticket.id,
+      k_number: ticket.k_number,
+      status: ticket.status,
+      group_code: ticket.group_code,
+      created_at: ticket.created_at,
+      similarity: meta[ticket.id]?.similarity ?? null,
+      label: meta[ticket.id]?.label ?? null,
+    }))
+    .sort((a, b) => {
+      const similarityDiff = (b.similarity ?? -1) - (a.similarity ?? -1);
+      if (similarityDiff !== 0) return similarityDiff;
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+}
+
 export async function getCoincidencesDetail(ticketId) {
   const target = await loadTicketWithItems(ticketId);
   if (!target) return null;

@@ -130,6 +130,29 @@ Devuelve el ticket con `items` (cada uno con sus `alternatives`), `extensions`,
 `forwarding_log`, `attachments`, `sla`, `quote_total` y, salvo que se indique lo contrario,
 los `blocks` de texto generados.
 
+También incluye `coincidences`, con las referencias directas a los tickets marcados como
+coincidentes:
+
+```json
+{
+  "ticket": {
+    "duplicate_label": "dup_positive",
+    "coincidence_count": 1
+  },
+  "coincidences": [
+    {
+      "id": "uuid-del-ticket",
+      "k_number": "K001800",
+      "status": "closed",
+      "group_code": "0217",
+      "created_at": "2026-06-20T10:00:00.000Z",
+      "similarity": 0.85,
+      "label": "dup_positive"
+    }
+  ]
+}
+```
+
 Query params opcionales: `include_blocks=false`, `include_attachment_urls=false`.
 
 ---
@@ -152,10 +175,14 @@ Permite a PUTIX actualizar los campos editables del ticket (**cabecera**) y de s
    `ignored_fields`. No es un error enviarlos, simplemente no se aplican.
 2. **Solo estados sincronizables:** si el ticket está en `pedido`, `closed`, `cancelled`,
    `en_revision` o `reenviado`, la llamada devuelve `409 TICKET_NOT_SYNCABLE`.
-3. **Los ítems se identifican por `id`** y deben pertenecer al ticket. Este endpoint
-   **actualiza** ítems existentes; **no** agrega ni elimina ítems.
+3. **Ciclo de vida de ítems según estado** (confirmado con Distrimia):
+   - crear (sin `id`, opcional `client_ref`) → solo `in_progress`
+   - eliminar (`_delete: true`) → solo `in_progress`
+   - excluir (`pedido_excluded: true`) → `in_progress` o `pedido`
+   - en `pedido` no se elimina físicamente; solo se excluye
 4. Al aplicar el cambio se refresca `updated_at`, por lo que el ticket aparecerá en el
    siguiente `updated_since`.
+5. Las creaciones devuelven el `id` generado en `updated.items_created` correlacionado con `client_ref`.
 
 **Body:**
 
@@ -167,7 +194,10 @@ Permite a PUTIX actualizar los campos editables del ticket (**cabecera**) y de s
     "vehicle_info": { "marca": "CHEVROLET", "modelo": "LUV", "anio": "2004" }
   },
   "items": [
-    { "id": "<uuid-item>", "selling_price": 18.5, "supplier_code": "IMP-001", "status": "positive" }
+    { "id": "<uuid-item>", "selling_price": 18.5, "supplier_code": "IMP-001", "status": "positive" },
+    { "client_ref": "tmp-1", "parsed_description": "Filtro de aceite", "quantity": 1 },
+    { "id": "<uuid-eliminar>", "_delete": true },
+    { "id": "<uuid-excluir>", "pedido_excluded": true }
   ]
 }
 ```
@@ -179,11 +209,19 @@ Ambas secciones son opcionales, pero debe enviarse al menos una con contenido.
 ```json
 {
   "api_version": "v1",
-  "updated": { "ticket_fields": ["status", "seller_notes", "vehicle_info"], "items_updated": 1 },
+  "updated": {
+    "ticket_fields": ["status", "seller_notes", "vehicle_info"],
+    "items_updated": 2,
+    "items_created": [{ "client_ref": "tmp-1", "id": "uuid-nuevo", "index": 1 }],
+    "items_deleted": ["uuid-eliminar"],
+    "items_excluded": ["uuid-excluir"]
+  },
   "ignored_fields": { "ticket": [], "items": {} },
   "ticket": { "...": "payload completo actualizado (igual que GET /tickets/:id)" }
 }
 ```
+
+Documentación detallada del ciclo de vida: `PUTIX-ITEMS-LIFECYCLE-v1.md`.
 
 ---
 
@@ -195,7 +233,7 @@ Ambas secciones son opcionales, pero debe enviarse al menos una con contenido.
 
 `status`, `priority`, `length_class`, `vin`, `vehicle_info`, `seller_notes`, `block_notes`,
 `notes`, `is_venta_concreta`, `conversion_status`, `duplicate_label`, `sender_name`,
-`sender_phone`, `client_phone`.
+`sender_phone`, `client_phone`, `assigned_to` (uuid de usuario Mini Web activo, o `null`).
 
 ### 5.2 Detalle (`items[]`) — requiere `id`
 
@@ -208,7 +246,7 @@ Ambas secciones son opcionales, pero debe enviarse al menos una con contenido.
 ### 5.3 NO editables (se ignoran)
 
 `id`, `k_number`, `group_code`, `raw_text`, `putix_ref`, `ticket_id`, `parent_ticket_id`,
-`assigned_to`, `created_by`, `updated_by`, `created_at`, `updated_at`, campos `sla_*`,
+`created_by`, `updated_by`, `created_at`, `updated_at`, campos `sla_*`,
 campos `lock_*` y cualquier otro identificador de integridad.
 
 ---
@@ -248,6 +286,19 @@ GET /tickets?status=closed&sort_order=asc&created_since=2025-01-01T00:00:00Z&lim
 ```
 
 El detalle completo de cada uno se obtiene con `GET /tickets/:id`.
+
+Para un **sync inicial completo de todo el historial** (todos los estados), omitir
+`updated_since` y `status`, y recorrer todas las páginas:
+
+```
+GET /tickets?sort_order=asc&limit=100&page=1
+GET /tickets?sort_order=asc&limit=100&page=2
+...
+```
+
+La respuesta indica `pagination.total_pages`. PUTIX debe continuar hasta esa página. No existe
+una respuesta ilimitada; el máximo es 100 tickets por página para proteger el servicio.
+Después del sync inicial, continuar con el polling normal usando `updated_since`.
 
 ---
 

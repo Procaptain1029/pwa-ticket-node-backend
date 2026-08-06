@@ -120,13 +120,14 @@ router.get('/tickets/:id/blocks', requirePutixApiKey, asyncRoute(async (req, res
 /**
  * Write-back: PUTIX updates a ticket header (cabecera) and/or its items (detalle).
  *
- * Body: { ticket?: {...editable fields}, items?: [{ id, ...editable fields }] }
+ * Body: { ticket?: {...}, items?: [
+ *   { id, ...fields },                 // update
+ *   { client_ref, parsed_description }, // create (in_progress)
+ *   { id, _delete: true },              // delete (in_progress)
+ *   { id, pedido_excluded: true },      // exclude (in_progress|pedido)
+ * ]}
  *
- * Only fields in the editable allow-lists are applied; PKs/FKs/identifiers are
- * ignored and reported in `ignored_fields`. Only tickets in a syncable status
- * (pending, pending_review, in_progress, ready) can be modified.
- *
- * PATCH and PUT are both accepted (partial update semantics either way).
+ * Response.updated includes items_created[{client_ref,id}], items_deleted, items_excluded.
  */
 const writeBackHandler = asyncRoute(async (req, res) => {
   const result = await updateTicketFromPutix(req.params.id, req.body, {

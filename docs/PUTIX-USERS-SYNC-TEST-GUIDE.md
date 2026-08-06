@@ -85,24 +85,32 @@ $body = @{
 Invoke-RestMethod -Method Patch -Uri "$base/tickets/$ticketId" -Headers $headers -ContentType "application/json" -Body $body | ConvertTo-Json -Depth 8
 ```
 
-Expected: `updated.ticket_fields` includes `assigned_to`; response `ticket.ticket.assigned_to` / `assigned_to_user` matches.
-
-### Verify
+### 2c. Assign = Tomar (lock + SLA)
 
 ```powershell
-$detail = Invoke-RestMethod -Uri "$base/tickets/$ticketId" -Headers $headers
-$detail.ticket.assigned_to
-$detail.ticket.assigned_to_user
-$detail.ticket.assigned_at
+$body = @{
+  ticket = @{
+    assigned_to = $userId
+    status      = "in_progress"
+  }
+} | ConvertTo-Json -Depth 10
+
+$result = Invoke-RestMethod -Method Patch -Uri "$base/tickets/$ticketId" -Headers $headers -ContentType "application/json" -Body $body
+$result.updated | ConvertTo-Json
+# Expect: take_applied = true
+$result.ticket.ticket.assigned_to
+$result.ticket.ticket.locked_by_user
+$result.ticket.ticket.sla
 ```
 
-### Unassign
+After this, Mini Web should show LISTO / LIBERAR (not TOMAR).
+
+### Unassign (releases lock)
 
 ```powershell
-$body = @{ ticket = @{ assigned_to = $null } } | ConvertTo-Json -Depth 10
-# PowerShell ConvertTo-Json may omit null — prefer explicit JSON:
 $body = '{"ticket":{"assigned_to":null}}'
 Invoke-RestMethod -Method Patch -Uri "$base/tickets/$ticketId" -Headers $headers -ContentType "application/json" -Body $body | ConvertTo-Json -Depth 6
+# Expect: release_applied = true; Tomar appears again
 ```
 
 ---
@@ -142,7 +150,8 @@ catch { $_.ErrorDetails.Message }
 - [ ] GET by id
 - [ ] Unknown user → 404
 - [ ] PATCH assign `assigned_to` + `status`
-- [ ] `assigned_to_user` populated on GET
-- [ ] Unassign with `null`
+- [ ] `take_applied: true` and `locked_by_user` present
+- [ ] Mini Web hides TOMAR / shows LIBERAR
+- [ ] Unassign with `null` → `release_applied`
 - [ ] Invalid / unknown assignee → 400
 - [ ] Missing key → 401

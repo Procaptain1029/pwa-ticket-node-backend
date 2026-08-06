@@ -21,15 +21,19 @@ Para el resto de la API (lectura, listados, polling) ver `PUTIX-API-v1.md`.
 
 ## 2. Reglas de negocio
 
-1. **Solo estados sincronizables.** El ticket debe estar en `pending`, `pending_review`,
-   `in_progress` o `ready`. En otro caso → `409 TICKET_NOT_SYNCABLE`.
+1. **Estados escribibles.** `pending`, `pending_review`, `in_progress`, `ready`, y `pedido`
+   (este último solo para excluir ítems). Otro estado → `409 TICKET_NOT_SYNCABLE`.
 2. **Lista blanca (allow-list).** Solo se aplican los campos editables (ver §5). Cualquier PK,
    FK o identificador de integridad que envíen se **ignora** (no es error) y se devuelve en
    `ignored_fields`.
-3. **Los ítems se identifican por `id`** y deben pertenecer al ticket.
-4. Este endpoint **actualiza ítems existentes**; **no** agrega ni elimina ítems.
-5. Al aplicar el cambio se refresca `updated_at`, por lo que el ticket volverá a aparecer en el
-   siguiente `GET /tickets?updated_since=...`.
+3. **Ciclo de vida de ítems** (confirmado con Distrimia):
+   - crear (sin `id`, opcional `client_ref`) → solo `in_progress`
+   - eliminar (`id` + `_delete: true`) → solo `in_progress`
+   - excluir (`pedido_excluded: true`) → `in_progress` o `pedido`
+4. Al aplicar el cambio se refresca `updated_at`.
+5. Las creaciones devuelven `updated.items_created[{ client_ref, id }]`.
+
+Detalle: `PUTIX-ITEMS-LIFECYCLE-v1.md`.
 
 ---
 
